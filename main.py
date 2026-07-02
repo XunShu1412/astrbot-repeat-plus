@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AstrBot 复读增强插件 v2.0.5 — Vis.js CDN 加速：移除 630KB 嵌入文件，repo 瘦身 25%"""
+"""AstrBot 复读增强插件 v2.0.5 — 性能优化：独立锁/合并遍历/脏标记持久化"""
 
 import random, logging, time, re, copy, asyncio, json, os
 from typing import Dict, List, Set, Optional, Tuple, Any
@@ -250,6 +250,7 @@ class RepeatPlusPlugin(Star):
         self.group_events: Dict[str, List[Dict[str, Any]]] = {}
         self.trigger_times: Dict[str, List[float]] = {}
         self.lock = asyncio.Lock()
+        self._hub_active_lock = asyncio.Lock()  # 独立锁，避免热路径与 _sync_config 竞争
 
         # 策略实例
         self.strategies: Dict[str, InterruptStrategy] = {
@@ -302,11 +303,12 @@ class RepeatPlusPlugin(Star):
         self._data_dir = _DATA_DIR
         os.makedirs(self._data_dir, exist_ok=True)
         self._load_persisted_data()
+        self._data_dirty = False  # 脏标记：仅在数据变更时持久化
 
         # 关键词路由表
         self._build_hub_keywords()
 
-        self._log(logging.INFO, "插件已加载 v1.3.3 (引力优化)")
+        self._log(logging.INFO, "插件已加载 v2.0.5")
 
     # ============================================================
     # 数据持久化
@@ -636,10 +638,15 @@ class RepeatPlusPlugin(Star):
             for u in stale_pc:
                 self._hub_propose_cd.pop(u, None)
 
-            # 持久化保存
-            self._save_persisted_data()
+            # 持久化保存 — 移出锁外，仅在数据变更时写入
+            self._data_dirty = True
 
             self._cfg_sync_ts = now
+
+        # 锁外持久化，避免阻塞热路径
+        if self._data_dirty:
+            self._save_persisted_data()
+            self._data_dirty = False
 
     def _compile_blacklist(self):
         bl = self.config.get("content_blacklist", "")
@@ -986,9 +993,9 @@ class RepeatPlusPlugin(Star):
                             "name": m.get("card") or m.get("nickname") or f"群友({muid})",
                             "ts": 0,
                         }
-                # 批量加锁写入 _hub_active，防止与 _sync_config 替换竞争
+                # 批量加锁写入 _hub_active，使用独立锁避免与消息处理竞争
                 if pool:
-                    async with self.lock:
+                    async with self._hub_active_lock:
                         active = self._hub_active.setdefault(gid, {})
                         for muid, info in new_members.items():
                             if muid not in active:
@@ -1096,6 +1103,7 @@ class RepeatPlusPlugin(Star):
                             "husband_id": uid, "husband_name": event.get_sender_name() or uid,
                             "ts": time.time(), "source": "mutual",
                         })
+        self._data_dirty = True
         if already_msg:
             tpl2, hid2 = already_msg
             chains2: List[Any] = []
@@ -1229,6 +1237,7 @@ class RepeatPlusPlugin(Star):
                     "ts": now, "source": "force",
                 })
                 self._hub_rbq_incr(gid, target_id)
+                self._data_dirty = True
         if lock_msg:
             await event.send(event.plain_result(lock_msg))
             return
@@ -1591,6 +1600,7 @@ class RepeatPlusPlugin(Star):
             })
             self._hub_rbq_incr(gid, proposal["to"])
             self._proposals.pop(gid, None)
+            self._data_dirty = True
             # 保存 proposal 数据供锁外发送消息使用
             from_name = proposal["from_name"]
             to_name = proposal["to_name"]
@@ -1618,6 +1628,7 @@ class RepeatPlusPlugin(Star):
             self._hub_propose_count[from_uid] = max(0, self._hub_propose_count.get(from_uid, 1) - 1)
             self._hub_propose_cd.pop(from_uid, None)
             self._proposals.pop(gid, None)
+            self._data_dirty = True
             from_name = proposal["from_name"]
 
         await e.send(e.plain_result(f"💔 {from_name} 的求婚被拒绝了...\n💡 求婚次数已返还，可以重新求婚~"))
@@ -1795,7 +1806,7 @@ class RepeatPlusPlugin(Star):
         else:
             hub_section = "💕 抽老公/老婆功能未开启，请在管理面板中启用。\n"
         await event.send(event.plain_result(
-            f"\U0001F4DF 复读插件 v1.3.3 指令帮助\n{'─'*30}\n"
+            f"\U0001F4DF 复读插件 v2.0.5 指令帮助\n{'─'*30}\n"
             f"🔧 管理（仅群聊）\n"
             "  /复读开启          在本群开启复读\n"
             "  /复读关闭          在本群关闭复读\n"
@@ -1804,7 +1815,7 @@ class RepeatPlusPlugin(Star):
             f"{'─'*30}\n"
             f"🏆 排行榜（仅群聊）\n{rl}\n{'─'*30}\n{hub_section}"
             f"{'─'*30}\n"
-            f"🔥 v1.3.3 正式版：非线性冷却 / 内高光 / 点阵 / 更大节点\n"
+            f"🔥 v2.0.5: 概率衰减加权 / Vis.js CDN / 性能优化\n"
             f"⚙️ 更多参数请在 WebUI 管理面板调整"))
 
     # ============================================================
@@ -1822,7 +1833,7 @@ class RepeatPlusPlugin(Star):
         cfg = self._cfg
 
         # 抽老公/老婆活跃追踪 — 独立于复读白名单/黑名单，只要发了消息就记录
-        async with self.lock:
+        async with self._hub_active_lock:
             self._hub_active.setdefault(gid, {})[sid] = {
                 "name": event.get_sender_name() or sid,
                 "ts": time.time(),
@@ -1895,19 +1906,22 @@ class RepeatPlusPlugin(Star):
     # ============================================================
     # 复读执行
     # ============================================================
-    def _contribs(self, gid: str, saved_sig: str, saved_txt: str, sid: str, sname: str
-                  ) -> List[Tuple[str, str]]:
+    def _contribs_and_filter(self, gid: str, saved_sig: str, saved_txt: str, sid: str, sname: str
+                  ) -> Tuple[List[Tuple[str, str]], List[Any]]:
+        """合并贡献者收集 + 窗口清理，一次遍历完成两项工作"""
         contrib: List[Tuple[str, str]] = []
+        remaining: List[Any] = []
         seen: Set[str] = set()
         same = self._cfg["allow_same_user"]
-        # 快照遍历，防止 _fire 锁内替换 deque 导致迭代器失效
-        for h in list(self.group_history[gid]):
+        for h in self.group_history[gid]:
             hs, hi, _, ht, hn = h
             if hs == saved_sig or self._similar(saved_sig, saved_txt, hs, ht):
                 if same or hi not in seen:
                     contrib.append((hi, sname if hi == sid else hn))
                     if not same: seen.add(hi)
-        return contrib
+            else:
+                remaining.append(h)
+        return contrib, remaining
 
     async def _fire(self, event: AstrMessageEvent, gid: str, chain: List[Any],
                      count: int, threshold: int, saved_sig: str, saved_txt: str) -> None:
@@ -1929,8 +1943,8 @@ class RepeatPlusPlugin(Star):
                     return
                 self.last_repeated_sig[gid] = (saved_sig, now)
 
-        # 贡献者收集
-        contrib = self._contribs(gid, saved_sig, saved_txt, sid, sname)
+        # 贡献者收集 + 窗口清理（合并为一次遍历）
+        contrib, remaining = self._contribs_and_filter(gid, saved_sig, saved_txt, sid, sname)
 
         async with self.lock:
             self.fast_trigger_count[gid] = self.fast_trigger_count.get(gid, 0) + 1
@@ -1938,6 +1952,8 @@ class RepeatPlusPlugin(Star):
             for cs, cn in contrib: self.group_events[gid].append({"sid": cs, "name": cn, "ts": now})
             if gid not in self.trigger_times: self.trigger_times[gid] = []
             self.trigger_times[gid].append(now)
+            # 窗口清理：用已过滤的剩余条目替换，无需再遍历
+            self.group_history[gid] = deque(remaining, maxlen=self.group_history[gid].maxlen)
 
         self._dbg(f"群 {gid} 触发 (C:{count} T:{threshold} contrib:{len(contrib)})")
 
@@ -1959,14 +1975,6 @@ class RepeatPlusPlugin(Star):
             await self._intr(event, gid, chain, intensity)
         else:
             await self._normal(event, gid, chain)
-
-        # 窗口清理：统一过滤匹配 saved_sig 的条目
-        async with self.lock:
-            self.group_history[gid] = deque(
-                [h for h in self.group_history[gid]
-                 if h[0] != saved_sig and
-                 not self._similar(saved_sig, saved_txt, h[0], h[3])],
-                maxlen=self.group_history[gid].maxlen)
 
     # ============================================================
     # 打断执行
@@ -1995,7 +2003,7 @@ class RepeatPlusPlugin(Star):
     # 正常复读
     # ============================================================
     async def _normal(self, event: AstrMessageEvent, gid: str, chain: List[Any]) -> None:
-        try: await event.send(event.chain_result([copy.copy(c) for c in chain]))
+        try: await event.send(event.chain_result(chain))
         except Exception as e:
             self._log(logging.ERROR, f"发送失败: {e}")
             await event.send(event.plain_result("+1"))

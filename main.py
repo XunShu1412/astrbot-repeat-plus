@@ -589,27 +589,24 @@ class RepeatPlusPlugin(Star):
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
                 hub_pruned = 0
-                for g in list(self._hub_active.keys()):
-                    before = len(self._hub_active[g])
-                    self._hub_active[g] = {
-                        u: d for u, d in self._hub_active[g].items()
-                        if d.get("ts", 0) >= hub_cutoff
-                    }
-                    hub_pruned += before - len(self._hub_active[g])
-                    # 仅当活跃用户为空且记录非今天/昨天时才清理该群数据
-                    if not self._hub_active[g]:
-                        if g in self._hub_records:
-                            rec = self._hub_records[g]
-                            rec_date = rec.get("date", "")
-                            if rec_date != today_str and rec_date != yesterday_str:
-                                self._hub_records.pop(g, None)
-                        self._hub_active.pop(g, None)
-                        self._hub_members_cache.pop(g, None)
-                        self._hub_drawn_recent.pop(g, None)
+                async with self._hub_active_lock:
+                    for g in list(self._hub_active.keys()):
+                        before = len(self._hub_active[g])
+                        self._hub_active[g] = {
+                            u: d for u, d in self._hub_active[g].items()
+                            if d.get("ts", 0) >= hub_cutoff
+                        }
+                        hub_pruned += before - len(self._hub_active[g])
+                        # 仅当活跃用户为空且记录非今天/昨天时才清理该群数据
+                        if not self._hub_active[g]:
+                            self._hub_active.pop(g, None)
+                            self._hub_members_cache.pop(g, None)
+                            self._hub_drawn_recent.pop(g, None)
+                # _hub_records 清理（不在 _hub_active_lock 内，避免锁嵌套过深）
                 for g in list(self._hub_records.keys()):
-                    rec = self._hub_records[g]
-                    if "date" in rec:
-                        rec_date = rec["date"]
+                    if g not in self._hub_active:
+                        rec = self._hub_records[g]
+                        rec_date = rec.get("date", "")
                         if rec_date != today_str and rec_date != yesterday_str:
                             self._hub_records.pop(g, None)
                 stale_cache = [g for g, v in self._hub_members_cache.items()
@@ -715,19 +712,19 @@ class RepeatPlusPlugin(Star):
             if cfg["allow_same_user"]:
                 m = 0
                 for i, h in enumerate(hist):
-                    if self._similar(sig, txt, h[0], h[3]): m += 1
+                    if self._similar(sig, txt, h[0], h[2]): m += 1
                     if i == len(hist) - 1 and m: lm = True
                 return float(m), lm
             senders: Set[str] = set()
             for i, h in enumerate(hist):
-                if self._similar(sig, txt, h[0], h[3]):
+                if self._similar(sig, txt, h[0], h[2]):
                     senders.add(h[1])
                     if i == len(hist) - 1: lm = True
             return float(len(senders)), lm
         tw, seen = 0.0, set()
         n = len(hist)
         for i, h in enumerate(hist):
-            if self._similar(sig, txt, h[0], h[3]):
+            if self._similar(sig, txt, h[0], h[2]):
                 if cfg["allow_same_user"]:
                     tw += (i + 1) / n
                 elif h[1] not in seen:
@@ -1893,7 +1890,7 @@ class RepeatPlusPlugin(Star):
             self.group_history[gid] = deque(self.group_history.get(gid, []), maxlen=ws)
 
         hist = self.group_history[gid]
-        hist.append((sig, sid, chain, txt, event.get_sender_name() or sid))
+        hist.append((sig, sid, txt, event.get_sender_name() or sid))
 
         threshold = cfg["threshold"]
         if len(hist) < threshold: return
@@ -1917,7 +1914,7 @@ class RepeatPlusPlugin(Star):
         seen: Set[str] = set()
         same = self._cfg["allow_same_user"]
         for h in self.group_history[gid]:
-            hs, hi, _, ht, hn = h
+            hs, hi, ht, hn = h
             if hs == saved_sig or self._similar(saved_sig, saved_txt, hs, ht):
                 if same or hi not in seen:
                     contrib.append((hi, sname if hi == sid else hn))
@@ -1941,7 +1938,7 @@ class RepeatPlusPlugin(Star):
                     self._dbg(f"群 {gid} 重复抑制: {saved_sig[:30]}")
                     self.group_history[gid] = deque(
                         [h for h in self.group_history[gid]
-                         if not self._similar(saved_sig, saved_txt, h[0], h[3])],
+                         if not self._similar(saved_sig, saved_txt, h[0], h[2])],
                         maxlen=self.group_history[gid].maxlen)
                     return
                 self.last_repeated_sig[gid] = (saved_sig, now)

@@ -443,7 +443,10 @@ class RepeatPlusPlugin(Star):
     async def _check_admin(self, event: AstrMessageEvent, gid: str) -> bool:
         """检查发送者是否为机器人拥有者、群主或管理员"""
         uid = str(event.get_sender_id())
-        # 机器人拥有者（登录 bot 的 QQ 号）始终拥有最高权限
+        # 机器人拥有者（AstrBot 管理面板中配置的管理员 QQ）
+        if event.is_admin():
+            return True
+        # 机器人自己的 QQ（登录 bot 的账号）
         bot_id = str(getattr(event.message_obj, 'self_id', ''))
         if uid == bot_id:
             return True

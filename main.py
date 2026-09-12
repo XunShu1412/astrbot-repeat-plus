@@ -172,10 +172,9 @@ _TEMPLATE_MAP = {
 }
 
 # 指令关键字黑名单
-_RANK_CMDS = frozenset(["复读排行榜", "复读日榜", "复读周榜", "复读月榜", "复读统计"])
 _MGMT_CMDS = frozenset(["复读开启", "复读关闭", "复读状态", "复读帮助",
     "repeat", "repeat on", "repeat off", "repeat status", "repeat stat", "repeat help"])
-COMMAND_KEYWORDS = _RANK_CMDS | _MGMT_CMDS
+COMMAND_KEYWORDS = _MGMT_CMDS
 
 class InterruptStrategy(ABC):
     @abstractmethod
@@ -232,9 +231,6 @@ class CustomTextStrategy(InterruptStrategy):
         await event.send(event.plain_result(msg))
 
 class RepeatPlusPlugin(Star):
-
-    _RANK_MAP = {"复读排行榜": "all", "复读日榜": "day", "复读周榜": "week", "复读月榜": "month"}
-    _WIN_LABELS = {"day": "今日", "week": "本周", "month": "本月", "all": "累计"}
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -764,49 +760,6 @@ class RepeatPlusPlugin(Star):
         else: return None
         return s.timestamp()
 
-    def _win_label(self, mode: str) -> str:
-        return self._WIN_LABELS.get(mode, "累计")
-
-    def _agg_rank(self, gid: str, mode: str, top_n: int = 10) -> Tuple[List[Tuple[str, str, int]], int]:
-        events = self.group_events.get(gid, [])
-        if not events: return [], 0
-        t0 = self._ts_min(mode)
-        filtered = [e for e in events if t0 is None or e["ts"] >= t0]
-        if not filtered: return [], 0
-        uc: Dict[str, Tuple[str, int]] = {}
-        for e in filtered:
-            sid = e["sid"]; name = e.get("name", sid)
-            if sid in uc: _, pc = uc[sid]; uc[sid] = (name, pc + 1)
-            else: uc[sid] = (name, 1)
-        sorted_u = sorted(uc.items(), key=lambda x: -x[1][1])
-        r = []
-        for sid, (name, cnt) in sorted_u:
-            dn = name if name != sid else (sid[:10] + "…" if len(sid) > 10 else sid)
-            r.append((sid, dn, cnt))
-            if len(r) >= top_n: break
-        return r, len(filtered)
-
-    def _fmt_rank(self, gid: str, mode: str, top_n: int = 10) -> str:
-        rank, total = self._agg_rank(gid, mode, top_n)
-        tag = self._win_label(mode)
-        if not rank:
-            return (f"\U0001F4CA 复读排行榜 · {tag}\n"
-                    f"{'─'*30}\n  本群暂无复读记录\n{'─'*30}\n"
-                    f">> /复读日榜 /复读周榜 /复读月榜")
-        lines = [
-            f"\U0001F4CA 复读排行榜 · {tag}",
-            f"   本群{tag}贡献 {total} 人次",
-            "─" * 30,
-        ]
-        for i, (sid, name, cnt) in enumerate(rank):
-            medals = ["🥇", "🥈", "🥉"]
-            pf = medals[i] if i < 3 else f"  {i+1:>2}."
-            bar = "█" * min(cnt, 15)
-            lines.append(f"  {pf} {name}  {cnt}次  {bar}")
-        lines.append("─" * 30)
-        lines.append(">> /复读日榜 /复读周榜 /复读月榜")
-        return "\n".join(lines)
-
     # ============================================================
     # 事件入口
     # ============================================================
@@ -814,23 +767,6 @@ class RepeatPlusPlugin(Star):
     async def on_group_message(self, event: AstrMessageEvent) -> None:
         try: await self._pipe(event)
         except Exception as e: self._log(logging.ERROR, f"核心逻辑异常: {e}", exc_info=True)
-
-    # ============================================================
-    # 排行榜指令
-    # ============================================================
-    async def _cmd_rank(self, event: AstrMessageEvent, cmd: str) -> None:
-        gid = self._gid(event)
-        if not gid: await event.send(event.plain_result("⚠️ 排行榜仅支持在群聊中使用。")); return
-        await event.send(event.plain_result(self._fmt_rank(gid, self._RANK_MAP[cmd])))
-
-    @filter.command("复读排行榜")
-    async def on_rank(self, e: AstrMessageEvent) -> None: await self._cmd_rank(e, "复读排行榜")
-    @filter.command("复读日榜")
-    async def on_rd(self, e: AstrMessageEvent) -> None: await self._cmd_rank(e, "复读日榜")
-    @filter.command("复读周榜")
-    async def on_rw(self, e: AstrMessageEvent) -> None: await self._cmd_rank(e, "复读周榜")
-    @filter.command("复读月榜")
-    async def on_rm(self, e: AstrMessageEvent) -> None: await self._cmd_rank(e, "复读月榜")
 
     # ============================================================
     # 管理指令
@@ -1779,10 +1715,9 @@ class RepeatPlusPlugin(Star):
             f"  累计触发  {len(tr):>4} 次\n"
             f"  累计贡献  {len(ev):>4} 人次\n"
             f"  当前冷却  {cd:>4.0f}s\n"
-            f"{'─'*30}\n>> /复读排行榜 查看排行\n>> /复读状态 查看冷却进度"))
+            f"{'─'*30}\n>> /复读帮助 查看指令\n>> /复读状态 查看冷却进度"))
 
     async def _help(self, event: AstrMessageEvent) -> None:
-        rl = "\n".join(f"  /{cmd:<12} {self._win_label(mode)}" for cmd, mode in self._RANK_MAP.items())
         hus, wife = self._hub_enabled()
         if hus or wife:
             both = hus and wife
@@ -1812,8 +1747,7 @@ class RepeatPlusPlugin(Star):
             "  /复读关闭          在本群关闭复读\n"
             "  /复读状态          冷却进度+今日统计\n"
             "  /复读统计          本群今日/本周/累计\n"
-            f"{'─'*30}\n"
-            f"🏆 排行榜（仅群聊）\n{rl}\n{'─'*30}\n{hub_section}"
+            f"{'─'*30}\n{hub_section}"
             f"{'─'*30}\n"
             f"🔥 v2.0.5: 概率衰减加权 / Vis.js CDN / 性能优化\n"
             f"⚙️ 更多参数请在 WebUI 管理面板调整"))

@@ -210,14 +210,14 @@
         "default": 30,
         "min": 7,
         "max": 90,
-        "hint": "最近 N 天内发过言的人才能进入抽取池。默认 30 天。"
+        "hint": "最近 N 天内发过言的人才能进入随机抽取池。只影响随机抽取，不影响强娶。默认 30 天。"
     },
     "husband_require_active": {
         "group": "💕 抽取设置",
-        "description": "仅活跃成员可被抽",
+        "description": "随机抽取仅限活跃成员",
         "type": "bool",
         "default": true,
-        "hint": "开启：仅发言过的人可被抽。关闭：全群成员均可被抽（每次调用群成员 API）。"
+        "hint": "仅控制随机抽取：开启时只抽最近活跃成员，关闭时从全群成员抽取。强娶始终只校验群成员身份与排除名单。"
     },
     "husband_draw_decay_days": {
         "group": "💕 抽取设置",
@@ -233,7 +233,7 @@
         "description": "排除用户 QQ",
         "type": "text",
         "default": "",
-        "hint": "这些 QQ 号永远不会被抽到。逗号或换行分隔。适合排除机器人或不想参与的成员。"
+        "hint": "这些 QQ 号不会参与随机抽取、强娶或求婚。逗号或换行分隔，适合设置不参与关系玩法的成员。"
     },
     "max_records": {
         "group": "💕 抽取设置",
@@ -297,10 +297,10 @@
     },
     "allow_marry_bot": {
         "group": "💍 强娶与求婚",
-        "description": "允许强娶机器人",
+        "description": "允许与机器人建立关系",
         "type": "bool",
         "default": false,
-        "hint": "开启后允许用户强娶机器人。默认关闭。"
+        "hint": "开启后允许用户强娶或向机器人求婚。强娶机器人不受活跃池限制。默认关闭。"
     },
 
     "husband_keyword_trigger": {

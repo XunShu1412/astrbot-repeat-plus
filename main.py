@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AstrBot 复读增强插件 ProMax v2.1.3 — 收藏表情稳定识别修复"""
+"""AstrBot 复读增强插件 ProMax v2.1.4 — 交互话术与状态提示优化"""
 
 import random, logging, time, re, copy, asyncio, json, os, hashlib
 from typing import Dict, List, Set, Optional, Tuple, Any
@@ -17,7 +17,7 @@ from astrbot.api import AstrBotConfig
 
 logger = logging.getLogger("astrbot")
 
-PLUGIN_NAME = "RepeatProMax-Enterprise"
+PLUGIN_NAME = "RepeatProMax"
 LOG_PREFIX = f"[{PLUGIN_NAME}]"
 DEFAULT_COOLDOWN = 10
 CLEANUP_INTERVAL = 3600
@@ -83,46 +83,58 @@ _HUB_DRAW_RESULT = [
     "🎉 配对成功！\n今日组合：{user} ×【{husband}】\n{suffix}",
     "🌈 今日好运加载完毕：\n【{husband}】来到 {user} 身边。\n{suffix}",
 ]
-_HUB_DRAW_EMPTY = [
-    "😢 老公池空空如也……\n最近 {days} 天没有足够的活跃群友。\n>> 管理员可切换为全群抽取",
-    "🏜️ 暂时找不到可抽取成员。\n需要群友在最近 {days} 天内发过言。\n>> 或关闭「仅活跃成员」",
-    "🌊 缘分池还没热起来。\n让大家先在群里冒个泡吧！",
-    "📭 今日候选池暂无库存。\n随机抽取只会选择最近 {days} 天活跃的成员。",
-    "🫧 潜水党太多，缘分雷达没有信号。\n>> /不限制成员抽取 可切换全群模式",
-    "🌙 暂无符合条件的候选人。\n排除名单、机器人设置和活跃天数都会影响随机抽取。",
+_HUB_DRAW_EMPTY_ACTIVE = [
+    "😢 活跃抽取池暂时没有可选成员。\n最近 {days} 天内发言的群友不足，或可选成员都在排除名单中。\n>> 管理员可用 /不限制成员抽取 切换全群模式",
+    "🏜️ 暂时找不到符合活跃条件的群友。\n当前只抽取最近 {days} 天发过言的成员。\n>> 可让大家先冒个泡，或切换为全群抽取",
+    "🌊 活跃缘分池还没热起来。\n最近 {days} 天内发言的成员才会进入随机抽取。\n>> /不限制成员抽取 可切换抽取范围",
+    "📭 当前活跃候选池为空。\n请检查活跃天数、排除名单和机器人参与设置。",
+    "🫧 暂无符合条件的活跃群友。\n本次不会消耗随机抽取次数，请稍后再试。",
+    "🌙 缘分雷达暂时没有发现活跃候选人。\n本次抽取未成功，随机抽取次数保持不变。",
+]
+_HUB_DRAW_EMPTY_ALL = [
+    "😢 暂时没有可抽取的群成员。\n可能是成员列表获取失败，或可选成员都在排除名单中。\n本次不会消耗随机抽取次数。",
+    "📭 全群候选池暂时为空。\n请确认机器人能读取群成员列表，并检查玩法排除名单。",
+    "🌐 群成员名单暂时没有返回可用候选人。\n请稍后再试，本次随机抽取次数保持不变。",
+    "🧭 全群模式已生效，但当前没有符合条件的成员。\n机器人账号、发起者本人和排除名单成员不会进入候选池。",
+    "🔍 暂时无法从全群成员中选出对象。\n请检查群成员读取权限，或稍后重新抽取。",
+    "🌙 全群缘分池现在是空的。\n本次没有产生记录，也不会扣除随机抽取次数。",
 ]
 _HUB_DRAW_SUFFIX = [
-    "好好相处，别让缘分溜走 ❤️\n🎫 剩余次数 {remain} 次",
-    "记得给人家买杯奶茶 🧋\n🎫 剩余次数 {remain} 次",
-    "今天的快乐就交给你们了！\n🎫 剩余次数 {remain} 次",
-    "请认真对待这份随机缘分 🤝\n🎫 剩余次数 {remain} 次",
-    "今晚记得加个鸡腿 🍗\n🎫 剩余次数 {remain} 次",
-    "把好运也分享给对方吧 ✨\n🎫 剩余次数 {remain} 次",
-    "今日限定组合，记得好好营业~\n🎫 剩余次数 {remain} 次",
-    "缘分已生效，有效期到今晚十二点 🌙\n🎫 剩余次数 {remain} 次",
-    "截图留念吧，这可是今天的命定结果 📸\n🎫 剩余次数 {remain} 次",
-    "愿你们今天聊天不冷场！\n🎫 剩余次数 {remain} 次",
+    "好好相处，别让缘分溜走 ❤️\n🎫 今日剩余随机抽取 {remain} 次",
+    "记得给人家买杯奶茶 🧋\n🎫 今日剩余随机抽取 {remain} 次",
+    "今天的快乐就交给你们了！\n🎫 今日剩余随机抽取 {remain} 次",
+    "请认真对待这份随机缘分 🤝\n🎫 今日剩余随机抽取 {remain} 次",
+    "今晚记得加个鸡腿 🍗\n🎫 今日剩余随机抽取 {remain} 次",
+    "把好运也分享给对方吧 ✨\n🎫 今日剩余随机抽取 {remain} 次",
+    "今日限定组合，记得好好营业~\n🎫 今日剩余随机抽取 {remain} 次",
+    "缘分已生效，有效期到今晚十二点 🌙\n🎫 今日剩余随机抽取 {remain} 次",
+    "截图留念吧，这可是今天的命定结果 📸\n🎫 今日剩余随机抽取 {remain} 次",
+    "愿你们今天聊天不冷场！\n🎫 今日剩余随机抽取 {remain} 次",
+    "群聊搭子已匹配，去打个招呼吧 👋\n🎫 今日剩余随机抽取 {remain} 次",
+    "这份随机缘分已记入今日档案 📖\n🎫 今日剩余随机抽取 {remain} 次",
 ]
 _HUB_FORCE_OK = [
-    "💍 {user} 发出坚定宣言！\n【{target}】已成为今日老公。\n⏳ 冷却时间：{cd} 天",
-    "⚡ {user} 发动「强制绑定」！\n与【{target}】成功建立羁绊。\n⏳ 冷却时间：{cd} 天",
-    "🔨 {user} 一锤定音！\n【{target}】已被指定为老公。\n⏳ 冷却时间：{cd} 天",
-    "🎯 {user} 精准锁定【{target}】！\n本次强娶登记成功。\n⏳ 冷却时间：{cd} 天",
-    "🎣 缘分不用等，{user} 主动出击！\n【{target}】已加入今日名册。\n⏳ 冷却时间：{cd} 天",
-    "📜 羁绊登记完成：\n{user} ×【{target}】\n⏳ 冷却时间：{cd} 天",
-    "🌹 {user} 把选择权握在了自己手里！\n目标【{target}】，绑定成功。\n⏳ 冷却时间：{cd} 天",
-    "🚀 {user} 跳过随机环节，直接选择【{target}】！\n⏳ 冷却时间：{cd} 天",
-    "🧲 今日缘分被 {user} 强行校准：\n结果锁定为【{target}】。\n⏳ 冷却时间：{cd} 天",
-    "🎊 强娶成功！\n{user} 与【{target}】的羁绊已写入记录。\n⏳ 冷却时间：{cd} 天",
+    "💍 {user} 发出坚定宣言！\n【{target}】已成为今日老公。\n{cooldown_tip}",
+    "⚡ {user} 跳过随机环节，与【{target}】成功建立今日羁绊。\n{cooldown_tip}",
+    "🔨 {user} 一锤定音！\n【{target}】已被指定为今日老公。\n{cooldown_tip}",
+    "🎯 {user} 精准选择【{target}】！\n本次强娶登记成功。\n{cooldown_tip}",
+    "🎣 缘分不用等，{user} 主动出击！\n【{target}】已加入今日名册。\n{cooldown_tip}",
+    "📜 羁绊登记完成：\n{user} ×【{target}】\n{cooldown_tip}",
+    "🌹 {user} 把选择权握在了自己手里！\n目标【{target}】，登记成功。\n{cooldown_tip}",
+    "🚀 {user} 直接选择【{target}】作为今日老公！\n{cooldown_tip}",
+    "🧲 今日缘分由 {user} 精准校准：\n结果锁定为【{target}】。\n{cooldown_tip}",
+    "🎊 强娶成功！\n{user} 与【{target}】的羁绊已写入今日记录。\n{cooldown_tip}",
+    "📌 指定成功：{user} 今日选择了【{target}】。\n{cooldown_tip}",
+    "✨ 主动选择生效！\n{user} 与【{target}】已加入今日关系档案。\n{cooldown_tip}",
 ]
 _HUB_FORCE_CD = [
-    "⏳ 强娶技能冷却中……\n还需等待 {d}天{h}小时（冷却期 {cd} 天）",
-    "🧊 强娶之力正在恢复。\n{d}天{h}小时后可以再次使用。",
-    "🛑 今日不能连续发动强娶。\n剩余冷却：{d}天{h}小时。",
-    "🔋 强娶能量补充中……\n距离充满还有 {d}天{h}小时。",
-    "🗓️ 下一次强娶预约在 {d}天{h}小时后。\n冷却期：{cd} 天",
-    "🌙 缘分也需要休息。\n请在 {d}天{h}小时后再来。",
-    "📌 强娶许可证暂未刷新。\n剩余 {d}天{h}小时。",
+    "⏳ 强娶还在冷却中，还需等待 {remain}。",
+    "🧊 强娶能力正在恢复，{remain}后可以再次使用。",
+    "🛑 暂时不能再次强娶。\n剩余冷却：{remain}。",
+    "🔋 强娶能量补充中……\n距离恢复还有 {remain}。",
+    "🗓️ 下一次强娶可在 {remain}后使用。",
+    "🌙 缘分也需要休息，请在 {remain}后再来。",
+    "📌 强娶冷却尚未结束。\n剩余时间：{remain}。",
 ]
 _HUB_FORCE_DAILY = [
     "⏰ 今日强娶次数已用完（{count}/{limit}）。\n明天再来选择心仪对象吧！",
@@ -172,21 +184,21 @@ _HUB_FORCE_BOT_DISABLED = [
     "📡 机器人拒绝接收这份强娶申请——至少配置还没同意。",
 ]
 _HUB_MY_EMPTY = [
-    "💕 你今天还没有老公，快用 /今日老公 抽一个吧！\n🎫 剩余次数 {remain} 次",
-    "🌤️ 今日羁绊栏还是空的。\n发送 /今日老公 开启今天的缘分。\n🎫 剩余次数 {remain} 次",
-    "📭 暂无今日记录。\n随机抽取和强娶成功后会显示在这里。\n🎫 剩余次数 {remain} 次",
-    "✨ 今日缘分尚未加载，试试 /今日老公。\n🎫 剩余次数 {remain} 次",
-    "🧭 还没找到今天的老公？让命运转盘来决定吧。\n🎫 剩余次数 {remain} 次",
-    "🌱 今日关系从零开始。\n🎫 剩余次数 {remain} 次",
-    "🎲 骰子还没有掷出，今天的结果等你来揭晓。\n🎫 剩余次数 {remain} 次",
+    "💕 你今天还没有老公，快用 /今日老公 抽一个吧！\n🎫 今日剩余随机抽取 {remain} 次",
+    "🌤️ 今日羁绊栏还是空的。\n发送 /今日老公 开启今天的缘分。\n🎫 今日剩余随机抽取 {remain} 次",
+    "📭 暂无今日关系记录。\n随机抽取、强娶或求婚成功后会显示在这里。\n🎫 今日剩余随机抽取 {remain} 次",
+    "✨ 今日缘分尚未加载，试试 /今日老公。\n🎫 今日剩余随机抽取 {remain} 次",
+    "🧭 还没找到今天的老公？让命运转盘来决定吧。\n🎫 今日剩余随机抽取 {remain} 次",
+    "🌱 今日关系从零开始。\n🎫 今日剩余随机抽取 {remain} 次",
+    "🎲 骰子还没有掷出，今天的结果等你来揭晓。\n🎫 今日剩余随机抽取 {remain} 次",
 ]
 _HUB_MY_HEADER = [
     "💕 你今天的老公记录：", "📋 今日羁绊记录：", "💘 今日缘分一览：",
     "📜 今日夫君名册：", "💝 今天建立的关系：", "🗂️ 本日羁绊档案：", "🌟 今日配对结果：",
 ]
 _HUB_RANK_TITLE = [
-    "🏆 群内最受欢迎老公榜", "🏆 随机抽取人气榜", "🏆 群内老公热度榜",
-    "🏆 被选择次数天梯榜", "🏆 今日羁绊人气榜", "🏆 群友魅力排行榜",
+    "🏆 今日随机抽取人气榜", "🏆 随机抽取幸运榜", "🏆 群内随机缘分热度榜",
+    "🏆 今日被随机抽中次数榜", "🏆 随机羁绊人气榜", "🏆 群友随机抽取魅力榜",
 ]
 _HUB_RANK_EMPTY = [
     "本群今日暂无随机抽取记录，快来抽取第一位群友吧！",
@@ -194,7 +206,7 @@ _HUB_RANK_EMPTY = [
     "📭 排行榜暂时为空，随机抽取成功后会自动统计。",
     "🏜️ 榜单还是一片空白，开局就靠你了。",
     "🌱 人气榜正在萌芽，第一条记录会是谁呢？",
-    "🎯 暂无数据，先选择一位本群成员试试吧。",
+    "🎯 暂无数据，先随机抽取一位本群成员试试吧。",
 ]
 _HUB_HELP_INTRO = [
     "💕 抽老公系统帮助", "💕 羁绊玩法使用指南", "💕 今日配对功能说明",
@@ -202,7 +214,7 @@ _HUB_HELP_INTRO = [
 ]
 _HUB_MY_TAG_DRAW = ["✨ 随机抽取", "🎯 天降缘分", "🎲 命定结果", "🌸 随机邂逅", "🎪 转盘抽取", "🧭 缘分导航"]
 _HUB_MY_TAG_FORCE = ["🔨 强制绑定", "💍 主动选择", "⚡ 精准锁定", "📜 强娶登记", "🧲 缘分校准", "🎯 指定羁绊"]
-_HUB_MY_TAG_PROPOSE = ["💒 求婚成对", "💝 情投意合", "💌 双向奔赴", "🌹 玫瑰之约", "💍 求婚成功", "🎊 喜结连理"]
+_HUB_MY_TAG_PROPOSE = ["💒 求婚成对", "💝 双方同意", "💌 心意确认", "🌹 玫瑰之约", "💍 求婚成功", "🎊 喜结连理"]
 
 _HUB_PROPOSE_NO_TARGET = [
     "💍 请 @ 你想要求婚的对象。\n格式：/求婚 @用户",
@@ -224,9 +236,20 @@ _HUB_PROPOSE_BOT_DISABLED = [
 ]
 _HUB_PROPOSE_EXCLUDED = [
     "🚫 该成员当前不参与关系玩法，无法向其求婚。",
-    "🛡️ 目标位于参与排除名单中，请尊重对方的选择。",
-    "🌙 这位成员暂不接收求婚申请。",
+    "🛡️ 目标位于玩法排除名单中，请选择其他群友。",
+    "🌙 这位成员当前不接收关系玩法请求。",
     "📌 管理员已将该账号排除，请选择其他对象。",
+]
+_HUB_PROPOSE_NOT_MEMBER = [
+    "🔍 没有在当前群找到该成员，求婚申请未发送。",
+    "🚪 对方似乎已不在本群，请重新选择求婚对象。",
+    "⚠️ 只能向当前群里的成员发起求婚。",
+    "🧭 群成员校验未通过，请确认 @ 的对象仍在群内。",
+]
+_HUB_PROPOSE_VERIFY_FAILED = [
+    "⚠️ 暂时无法验证对方是否为本群成员，请稍后再试。\n本次不会消耗求婚次数或进入冷却。",
+    "🌐 群成员接口暂时没有响应，求婚申请未发送。\n请稍后重新尝试。",
+    "🔄 成员身份校验失败，本次求婚已安全取消。\n求婚次数与冷却保持不变。",
 ]
 _HUB_PROPOSE_PENDING = [
     "💍 对方已经有一份待处理的求婚，请等待回应。",
@@ -241,44 +264,58 @@ _HUB_PROPOSE_NONE = [
     "🌙 暂无等待接受或拒绝的请求。",
 ]
 _HUB_PROPOSE_INVITE = [
-    "💍 {user} 向你发起求婚！\n\n「从今天起，愿意成为我的{label}吗？」\n\n>> 回复 /接受求婚 或 /拒绝求婚",
-    "🌹 {user} 把花递到了你面前：\n\n「愿意和我建立今天的羁绊吗？」\n\n>> /接受求婚 或 /拒绝求婚",
-    "💌 你收到一封来自 {user} 的求婚信！\n\n目标身份：{label}\n>> 请在 5 分钟内回应",
-    "✨ 群聊见证这一刻：\n{user} 正式向你求婚！\n\n>> /接受求婚 或 /拒绝求婚",
-    "🎤 {user} 鼓起勇气说道：\n「我的今日{label}，可以是你吗？」\n\n>> 请在 5 分钟内回应",
-    "📜 求婚申请已送达：\n发起人：{user}\n申请关系：{label}\n\n>> /接受求婚 或 /拒绝求婚",
-    "🌙 今晚的月色很适合告白。\n{user} 想邀请你成为今日{label}。\n\n>> 请及时回应",
-    "🎊 突发喜讯候选：\n{user} 向你发起了认真又浪漫的求婚！\n\n>> /接受求婚 或 /拒绝求婚",
+    "💍 {user} 向你发起求婚！\n\n「从今天起，愿意成为我的{label}吗？」",
+    "🌹 {user} 把花递到了你面前：\n\n「愿意和我建立今天的羁绊吗？」",
+    "💌 你收到一封来自 {user} 的求婚信！\n\n申请关系：今日{label}",
+    "✨ 群聊见证这一刻：\n{user} 正式向你发起求婚！",
+    "🎤 {user} 鼓起勇气说道：\n「我的今日{label}，可以是你吗？」",
+    "📜 求婚申请已送达：\n发起人：{user}\n申请关系：今日{label}",
+    "🌙 今晚的月色很适合告白。\n{user} 想邀请你成为今日{label}。",
+    "🎊 群聊喜讯候选：\n{user} 向你发起了一份认真又浪漫的求婚！",
+    "💫 今日心动信号已发送：\n{user} 正在等待你的回应。",
+    "🎁 {user} 送来一份今日羁绊邀请：\n愿意成为对方的{label}吗？",
+    "📣 全群见证！\n{user} 向你递交了今日求婚申请。",
+    "🕊️ 一封告白抵达你的收件箱：\n{user} 希望与你建立今日{label}关系。",
 ]
 _HUB_PROPOSE_ACCEPT = [
     "💒 恭喜！{from_name} 和 {to_name} 喜结连理！\n从今天起，{to_name} 就是 {from_name} 的{label}了！🎉",
     "🎊 求婚成功！\n{from_name} × {to_name} 的羁绊正式生效。",
     "🌹 {to_name} 接受了 {from_name} 的求婚！\n愿今天的群聊充满甜度~",
-    "✨ 双向奔赴达成！\n{from_name} 与 {to_name} 已写入今日关系记录。",
+    "✨ 双方同意达成！\n{from_name} 与 {to_name} 已写入今日关系记录。",
     "💍 一声同意，缘分落定。\n{to_name} 成为了 {from_name} 的今日{label}。",
     "📜 群聊婚姻登记处宣布：\n{from_name} 和 {to_name} 配对成功！",
+    "💝 心意已确认！\n{from_name} 与 {to_name} 的今日羁绊正式成立。",
+    "🎉 接受成功！\n今日关系：{from_name} × {to_name}。",
 ]
 _HUB_PROPOSE_REJECT = [
-    "💔 {from_name} 的求婚被婉拒了。\n求婚次数和冷却已返还，可以重新选择。",
-    "🌧️ 很遗憾，这次没有牵手成功。\n{from_name} 的次数已经返还。",
-    "📨 对方暂时没有接受 {from_name} 的求婚。\n本次额度已退回。",
+    "💔 {from_name} 的求婚被婉拒了。\n尊重选择，下次再鼓起勇气吧。",
+    "🌧️ 很遗憾，这次没有牵手成功。\n愿下一次心意恰好同频。",
+    "📨 对方暂时没有接受 {from_name} 的求婚。",
     "🌙 缘分还没到，{from_name} 可以稍后再试。",
-    "🍃 这次告白轻轻落空，但机会已经返还。",
+    "🍃 这次告白轻轻落空，下一段缘分也许正在路上。",
     "🫶 尊重对方的选择，下一段缘分也许正在路上。",
+    "🌱 求婚没有成功，不过勇气值得收藏。",
+    "🕊️ 这份心意没有被接受，愿彼此相处依然轻松自在。",
 ]
 _HUB_PROPOSE_EXPIRED = [
-    "⏰ 求婚请求已超过 5 分钟，请重新发起。\n求婚次数和冷却已返还。",
-    "⌛ 这份求婚已经过期，额度已自动退回。",
+    "⏰ 求婚请求已超过 5 分钟，请重新发起。",
+    "⌛ 这份求婚已经过期，可以重新选择对象。",
     "📭 对方未在有效时间内回应，请再次发送求婚。",
     "🌙 求婚等待时间结束，本次申请已安全取消。",
+    "🕰️ 回应时间已经结束，这份求婚自动失效。",
+    "📨 求婚信未在 5 分钟内收到回复，请重新发起。",
 ]
 
+_PROPOSAL_RESPONSE_TIP = "\n\n⏳ 请在 5 分钟内回复：/接受求婚 或 /拒绝求婚"
+_PROPOSAL_REFUND_TIP = "\n🎫 求婚次数与冷却已返还。"
+
 # 性别替换规则 — 老婆模式运行时替换（按长度降序，避免短词覆盖长词）
-_GENDER_SUB = [("真命天子", "真命天女"), ("一天一夫", "一天一妻"), ("男人们", "女人们"), ("夫君", "娘子"), ("老公", "老婆"), ("他", "她")]
+_GENDER_SUB = [("真命天子", "真命天女"), ("一天一夫", "一天一妻"), ("男人们", "女人们"), ("夫君", "娘子"), ("老公", "老婆")]
 
 _TEMPLATE_MAP = {
     "draw_already": _HUB_DRAW_ALREADY, "draw_already_multi": _HUB_DRAW_ALREADY_MULTI,
-    "draw_result": _HUB_DRAW_RESULT, "draw_empty": _HUB_DRAW_EMPTY,
+    "draw_result": _HUB_DRAW_RESULT,
+    "draw_empty_active": _HUB_DRAW_EMPTY_ACTIVE, "draw_empty_all": _HUB_DRAW_EMPTY_ALL,
     "draw_suffix": _HUB_DRAW_SUFFIX, "force_ok": _HUB_FORCE_OK,
     "force_cd": _HUB_FORCE_CD, "force_daily": _HUB_FORCE_DAILY,
     "force_no_target": _HUB_FORCE_NO_TARGET, "force_self": _HUB_FORCE_SELF,
@@ -290,7 +327,10 @@ _TEMPLATE_MAP = {
     "my_tag_force": _HUB_MY_TAG_FORCE, "my_tag_propose": _HUB_MY_TAG_PROPOSE,
     "propose_no_target": _HUB_PROPOSE_NO_TARGET, "propose_self": _HUB_PROPOSE_SELF,
     "propose_bot_disabled": _HUB_PROPOSE_BOT_DISABLED,
-    "propose_excluded": _HUB_PROPOSE_EXCLUDED, "propose_pending": _HUB_PROPOSE_PENDING,
+    "propose_excluded": _HUB_PROPOSE_EXCLUDED,
+    "propose_not_member": _HUB_PROPOSE_NOT_MEMBER,
+    "propose_verify_failed": _HUB_PROPOSE_VERIFY_FAILED,
+    "propose_pending": _HUB_PROPOSE_PENDING,
     "propose_none": _HUB_PROPOSE_NONE, "propose_invite": _HUB_PROPOSE_INVITE,
     "propose_accept": _HUB_PROPOSE_ACCEPT, "propose_reject": _HUB_PROPOSE_REJECT,
     "propose_expired": _HUB_PROPOSE_EXPIRED,
@@ -435,7 +475,7 @@ class RepeatProMaxPlugin(Star):
         # 关键词路由表
         self._build_hub_keywords()
 
-        self._log(logging.INFO, "插件已加载 ProMax v2.1.3")
+        self._log(logging.INFO, "插件已加载 ProMax v2.1.4")
 
     # ============================================================
     # 数据持久化
@@ -693,10 +733,24 @@ class RepeatProMaxPlugin(Star):
 
     @staticmethod
     def _T(tpl: str, mode: str) -> str:
-        """性别替换: 老公模式原样返回, 老婆模式替换 老公→老婆 他→她 等"""
+        """性别替换：老公模式原样返回，老婆模式仅替换明确的性别称谓。"""
         if mode != "wife": return tpl
         for old, new in _GENDER_SUB: tpl = tpl.replace(old, new)
         return tpl
+
+    @staticmethod
+    def _duration_text(seconds: float) -> str:
+        """把剩余秒数转换为最多两段、适合群聊阅读的时间。"""
+        total = max(0, int(seconds + 0.999))
+        days, remainder = divmod(total, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, secs = divmod(remainder, 60)
+        parts = []
+        if days: parts.append(f"{days}天")
+        if hours: parts.append(f"{hours}小时")
+        if minutes: parts.append(f"{minutes}分钟")
+        if secs or not parts: parts.append(f"{secs}秒")
+        return "".join(parts[:2])
 
     def _hb(self, key: str, mode: str = "husband") -> str:
         """Husband/Wife Bridge: 返回一条随机模板(已应用性别替换)"""
@@ -1391,7 +1445,8 @@ class RepeatProMaxPlugin(Star):
 
     def _already_msg(self, user_recs: List[Dict], daily: int, mode: str, sender_name: str, sender_id: str) -> Tuple[str, str, str]:
         """构造已绑定提示: 返回 (tpl_key, 格式化文本, husband_id)"""
-        h = user_recs[0]
+        # 多次抽取达到上限时，话术写的是“最近/最后一位”，必须展示最新记录。
+        h = user_recs[-1]
         tpl_key = "draw_already" if daily == 1 else "draw_already_multi"
         fmt = {"user": sender_name or sender_id, "husband": h["husband_name"]}
         if daily > 1: fmt["count"] = len(user_recs)
@@ -1555,8 +1610,10 @@ class RepeatProMaxPlugin(Star):
 
         pool = await self._hub_resolve_pool(event, gid, uid, bid)
         if not pool:
+            empty_key = ("draw_empty_active" if self._cfg.get("hub_require_active", False)
+                         else "draw_empty_all")
             await event.send(event.plain_result(
-                self._hb("draw_empty", mode).format(
+                self._hb(empty_key, mode).format(
                     days=self._cfg.get("hub_active_days", 30))))
             return
 
@@ -1730,8 +1787,8 @@ class RepeatProMaxPlugin(Star):
             last_force2 = self._hub_force_cd.get(uid, 0)
             if now - last_force2 < force_cd * 86400:
                 remain = force_cd * 86400 - (now - last_force2)
-                d = int(remain // 86400); h = int((remain % 86400) // 3600)
-                lock_msg = self._hb("force_cd", mode).format(d=d, h=h, cd=force_cd)
+                lock_msg = self._hb("force_cd", mode).format(
+                    remain=self._duration_text(remain))
             elif force_daily > 0:
                 today_force = sum(1 for r in today_recs
                                   if r.get("user_id") == uid and r.get("source") == "force")
@@ -1751,9 +1808,12 @@ class RepeatProMaxPlugin(Star):
             return
         self._flush_persisted_data()
 
+        cooldown_tip = (f"⏳ 下次强娶：{force_cd} 天后可用"
+                        if force_cd > 0 else "✨ 当前未启用强娶冷却")
+
         await event.send(event.chain_result([
             At(qq=uid),
-            Plain(f" {self._hb('force_ok', mode).format(user=user_name, target=target_name, cd=force_cd)}"),
+            Plain(f" {self._hb('force_ok', mode).format(user=user_name, target=target_name, cooldown_tip=cooldown_tip)}"),
             Image.fromURL(avatar_url),
         ]))
 
@@ -1830,20 +1890,20 @@ class RepeatProMaxPlugin(Star):
         await event.send(event.plain_result(
             self._hb("help_intro", mode) + "\n" +
             f"  /今日{label} /抽{label}   随机抽取今日{label}\n" +
-            f"  /我的{label} /{label}记录 查看今日抽取记录\n" +
-            f"  /{force_label} @用户    指定本群成员（不受活跃池限制）\n" +
+            f"  /我的{label} /{label}记录 查看今日关系记录\n" +
+            f"  /{force_label} @用户    指定本群成员为今日{label}\n" +
             f"  /{label}排行榜 /{label}排行 今日随机抽取人气排行\n" +
             f"  /不限制成员抽取     切换全群抽取/仅活跃\n" +
             f"  /{label}帮助          查看此帮助\n" +
             f"  /关系图 /gxt /羁绊图谱 生成羁绊关系图（含头像+统计）\n" +
             f"  /求婚 @用户 /qh     向指定用户求婚\n" +
             f"  /重置记录 /czjl     管理员重置记录\n" +
-            f"  /重置强娶时间 /czqqsj 管理员重置强娶CD\n" +
+            f"  /重置强娶时间 /czqqsj 重置自己的强娶冷却（@他人需管理）\n" +
             abbr_lines +
             "\n" +
             "  > 当前模式：" + mode_str + "\n" +
             "  > 活跃限制：" + active_status + "\n" +
-            "  > 活跃限制只影响随机抽取；强娶仅校验群成员和排除名单。\n" +
+            "  > 活跃限制只影响随机抽取；强娶和求婚会校验本群成员。\n" +
             "  > 随机抽取次数独立计数；强娶/求婚不会重置或占用额度。\n" +
             "  > 强娶结果直接进入今日记录，但不参与排行榜。\n" +
             "  > 开启关键词触发后，可直接发关键词无需 / 前缀。"))
@@ -2066,30 +2126,56 @@ class RepeatProMaxPlugin(Star):
                 self._hb("propose_bot_disabled", propose_mode)))
             return
 
+        is_member, target_name = await self._hub_lookup_group_member(
+            event, gid, target_id, bot_id)
+        if is_member is False:
+            await event.send(event.plain_result(
+                self._hb("propose_not_member", propose_mode)))
+            return
+        if is_member is None:
+            await event.send(event.plain_result(
+                self._hb("propose_verify_failed", propose_mode)))
+            return
+
         now_ts = time.time()
         propose_cd = self._cfg.get("hub_propose_cd", 86400)
         propose_daily = self._cfg.get("hub_propose_daily", 3)
 
-        target_name = ("机器人" if target_id == bot_id else
-                       self._hub_active.get(gid, {}).get(
-                           target_id, {}).get("name", f"用户({target_id})"))
         user_name = event.get_sender_name() or uid
         label = self._hb_label(propose_mode)
 
+        expired_refunded = False
         async with self.lock:
             # double-check：防止并发求婚超过每日限制 + CD 绕过
             lock_msg = None
             group_proposals = self._proposals.get(gid, {})
-            if target_id in group_proposals:
-                lock_msg = self._hb("propose_pending", propose_mode)
+            existing = group_proposals.get(target_id)
+            if existing:
+                if now_ts - existing.get("ts", 0) > 300:
+                    # 过期请求不能永久占住目标；发起新请求前自动清理并返还旧额度。
+                    old_from = existing.get("from", "")
+                    if old_from:
+                        self._hub_propose_count[old_from] = max(
+                            0, self._hub_propose_count.get(old_from, 1) - 1)
+                        self._hub_propose_cd.pop(old_from, None)
+                    group_proposals.pop(target_id, None)
+                    self._data_dirty = True
+                    expired_refunded = True
+                else:
+                    lock_msg = self._hb("propose_pending", propose_mode)
             if lock_msg is None and propose_cd > 0:
                 last_p2 = self._hub_propose_cd.get(uid, 0)
                 if now_ts - last_p2 < propose_cd:
-                    lock_msg = f"⏰ 你的求婚冷却中，{int(propose_cd - (now_ts - last_p2))} 秒后可再次发起求婚。"
+                    remain_text = self._duration_text(propose_cd - (now_ts - last_p2))
+                    lock_msg = (
+                        f"⏰ 求婚还在冷却中，{remain_text}后可再次发起。\n"
+                        "💡 若对方拒绝或请求超时，本次次数与冷却会自动返还。")
             if lock_msg is None and propose_daily > 0:
                 count = self._hub_propose_count.get(uid, 0)
                 if count >= propose_daily:
-                    lock_msg = f"⏰ 你今天已经求婚了 {count} 次，明天再来吧！(每日上限: {propose_daily} 次)"
+                    lock_msg = (
+                        f"🎫 今日求婚次数已用完（{count}/{propose_daily}）。\n"
+                        "被拒绝或超时的申请会自动返还次数与冷却。")
             if lock_msg is None:
                 if propose_cd > 0:
                     self._hub_propose_cd[uid] = now_ts
@@ -2101,11 +2187,13 @@ class RepeatProMaxPlugin(Star):
                 }
                 self._data_dirty = True
         if lock_msg:
+            if expired_refunded:
+                self._flush_persisted_data()
             await event.send(event.plain_result(lock_msg))
             return
         self._flush_persisted_data()
         invite = self._hb("propose_invite", propose_mode).format(
-            user=user_name, label=label)
+            user=user_name, label=label) + _PROPOSAL_RESPONSE_TIP
         await event.send(event.chain_result([
             At(qq=target_id),
             Plain("\n" + invite),
@@ -2163,7 +2251,8 @@ class RepeatProMaxPlugin(Star):
             return
         self._flush_persisted_data()
         if expired:
-            await e.send(e.plain_result(self._hb("propose_expired")))
+            await e.send(e.plain_result(
+                self._hb("propose_expired") + _PROPOSAL_REFUND_TIP))
             return
 
         await e.send(e.plain_result(
@@ -2207,7 +2296,7 @@ class RepeatProMaxPlugin(Star):
 
         await e.send(e.plain_result(
             self._hb("propose_reject", propose_mode).format(
-                from_name=from_name)))
+                from_name=from_name) + _PROPOSAL_REFUND_TIP))
 
     async def _cmd_reject_proposal(self, event: AstrMessageEvent) -> None:
         await self.on_reject_proposal(event)
@@ -2370,20 +2459,20 @@ class RepeatProMaxPlugin(Star):
             hub_section = (
                 f"💕 抽{label}（仅群聊）{dual_note}"
                 f"  /今日{main} /抽{main}   随机抽取今日{main}\n"
-                f"  /我的{main} /{main}记录  查看今日记录\n"
-                f"  /强娶{main} @用户    强行娶某人为{main}\n"
+                f"  /我的{main} /{main}记录  查看今日关系记录\n"
+                f"  /强娶{main} @用户    指定本群成员为今日{main}\n"
                 f"  /{main}排行 /{main}排行榜 今日随机抽取人气排行\n"
                 f"  /不限制成员抽取     切换全群抽取模式\n"
                 f"  /{main}帮助          抽{main}帮助\n"
                 f"  /关系图 /gxt       生成羁绊关系图（含头像+统计）\n"
                 f"  /求婚 @用户 /qh    向指定用户求婚\n"
-                f"  /重置记录 /czjl    管理员重置记录\n"
-                f"  /重置强娶时间 /czqqsj 重置强娶冷却\n{abbr}"
+                f"  /重置记录 /czjl    管理员重置本群今日记录\n"
+                f"  /重置强娶时间 /czqqsj 重置自己冷却（@他人需管理）\n{abbr}"
             )
         else:
             hub_section = "💕 抽老公/老婆功能未开启，请在管理面板中启用。\n"
         await event.send(event.plain_result(
-            f"\U0001F4DF RepeatProMax v2.1.3 指令帮助\n{'─'*30}\n"
+            f"\U0001F4DF RepeatProMax v2.1.4 指令帮助\n{'─'*30}\n"
             f"🔧 管理（仅群聊）\n"
             "  /复读开启          在本群开启复读\n"
             "  /复读关闭          在本群关闭复读\n"
@@ -2391,7 +2480,7 @@ class RepeatProMaxPlugin(Star):
             "  /复读统计          本群今日/本周/累计\n"
             f"{'─'*30}\n{hub_section}"
             f"{'─'*30}\n"
-            f"🔥 v2.1.3: 修复 QQ 收藏/自定义表情无法复读\n"
+            f"🔥 v2.1.4：优化玩法提示、求婚超时清理与文案一致性\n"
             f"⚙️ 更多参数请在 WebUI 管理面板调整"))
 
     # ============================================================

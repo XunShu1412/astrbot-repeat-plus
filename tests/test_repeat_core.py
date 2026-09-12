@@ -411,6 +411,9 @@ class RepeatCoreTests(unittest.IsolatedAsyncioTestCase):
         records = plugin._hub_today("20001")
         self.assertEqual(records[-1]["source"], "force")
         self.assertEqual(records[-1]["husband_id"], "30002")
+        reply = next(c.text for c in event.sent[0] if isinstance(c, Plain))
+        self.assertIn("未启用强娶冷却", reply)
+        self.assertNotIn("0 天", reply)
 
     async def test_failed_force_changes_neither_quota_nor_records(self):
         plugin = make_plugin(hub_force_cd=0)
@@ -467,6 +470,46 @@ class RepeatCoreTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(plugin._hub_draw_used("20001", "10001"), 1)
                 self.assertEqual(plugin._hub_propose_count.get("10001"), 0)
+                self.assertIn("求婚次数与冷却已返还", event.sent[0])
+
+    async def test_expired_proposal_does_not_keep_target_occupied(self):
+        plugin = make_plugin(hub_propose_cd=0)
+        plugin._hub_propose_count["40001"] = 1
+        plugin._hub_propose_cd["40001"] = time.time()
+        plugin._proposals = {"20001": {"30001": {
+            "from": "40001", "from_name": "旧发起者",
+            "to": "30001", "to_name": "目标",
+            "mode": "husband", "ts": time.time() - 301,
+        }}}
+
+        async def member(*_):
+            return True, "目标"
+
+        plugin._hub_lookup_group_member = member
+        event = FakeEvent([Plain("求婚"), At(qq="30001")])
+        await plugin._cmd_propose(event)
+
+        self.assertEqual(plugin._hub_propose_count.get("40001"), 0)
+        self.assertEqual(plugin._hub_propose_count.get("10001"), 1)
+        self.assertEqual(plugin._proposals["20001"]["30001"]["from"], "10001")
+        reply = next(c.text for c in event.sent[0] if isinstance(c, Plain))
+        self.assertIn("5 分钟内回复", reply)
+        self.assertIn("/接受求婚", reply)
+        self.assertIn("/拒绝求婚", reply)
+
+    async def test_proposal_rejects_non_member_without_using_quota(self):
+        plugin = make_plugin(hub_propose_cd=0)
+
+        async def non_member(*_):
+            return False, "群外用户"
+
+        plugin._hub_lookup_group_member = non_member
+        event = FakeEvent([Plain("求婚"), At(qq="30001")])
+        await plugin._cmd_propose(event)
+
+        self.assertEqual(plugin._hub_propose_count.get("10001", 0), 0)
+        self.assertEqual(plugin._proposals, {})
+        self.assertTrue("本群" in event.sent[0] or "当前群" in event.sent[0])
 
     async def test_proposal_daily_reset_does_not_touch_draw_usage(self):
         plugin = make_plugin()
@@ -541,6 +584,58 @@ class RepeatCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("强娶目标", result)
         self.assertNotIn("求婚目标", result)
         self.assertIn("强娶与求婚不参与排行", result)
+
+    async def test_empty_pool_message_matches_selected_pool_mode(self):
+        async def empty_pool(*_):
+            return []
+
+        active_plugin = make_plugin(hub_require_active=True)
+        active_plugin._hub_resolve_pool = empty_pool
+        active_event = FakeEvent([Plain("抽老公")])
+        await active_plugin._cmd_husband_draw(active_event)
+        self.assertIn("活跃", active_event.sent[0])
+
+        all_plugin = make_plugin(hub_require_active=False)
+        all_plugin._hub_resolve_pool = empty_pool
+        all_event = FakeEvent([Plain("抽老公")])
+        await all_plugin._cmd_husband_draw(all_event)
+        self.assertNotIn("活跃", all_event.sent[0])
+        self.assertTrue(
+            "全群" in all_event.sent[0] or "群成员" in all_event.sent[0])
+
+    def test_copy_templates_are_format_safe_and_gender_safe(self):
+        values = {
+            "user": "甲", "husband": "乙", "suffix": "提示", "days": 30,
+            "remain": 3, "target": "丙", "cooldown_tip": "冷却提示",
+            "cd": 3, "d": 1, "h": 2, "count": 3, "limit": 3,
+            "label": "老婆", "from_name": "甲", "to_name": "乙",
+        }
+        for key, templates in PLUGIN_MODULE._TEMPLATE_MAP.items():
+            with self.subTest(key=key):
+                self.assertTrue(templates)
+                for template in templates:
+                    rendered = template.format(**values)
+                    self.assertNotIn("其她", RepeatProMaxPlugin._T(rendered, "wife"))
+
+        self.assertEqual(
+            RepeatProMaxPlugin._T("请选择其他群友", "wife"),
+            "请选择其他群友",
+        )
+        self.assertEqual(RepeatProMaxPlugin._duration_text(59), "59秒")
+        self.assertEqual(RepeatProMaxPlugin._duration_text(3661), "1小时1分钟")
+
+    def test_quota_message_uses_latest_random_draw(self):
+        plugin = make_plugin()
+        records = [
+            {"husband_id": "30001", "husband_name": "第一位"},
+            {"husband_id": "30002", "husband_name": "最近一位"},
+        ]
+
+        _, message, target_id = plugin._already_msg(
+            records, 10, "husband", "发起者", "10001")
+
+        self.assertEqual(target_id, "30002")
+        self.assertIn("最近一位", message)
 
     def test_first_upgrade_migrates_only_random_draw_usage(self):
         plugin = make_plugin()

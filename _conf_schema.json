@@ -1,12 +1,12 @@
 {
     "threshold": {
         "group": "🎯 复读触发",
-        "description": "触发需要的重复数",
+        "description": "触发复读需要的重复消息数",
         "type": "int",
         "default": 3,
         "min": 1,
         "max": 20,
-        "hint": "最近的判定窗口内，出现多少条相同或相似消息后开始复读。推荐 3；数值越小越容易触发。请不要设置得大于“判定窗口消息数”。"
+        "hint": "最近的判定窗口内，累计多少条相同或相似消息后开始复读。推荐 3；数值越小越容易触发，且不能高于“判定窗口消息数”。"
     },
     "window_size": {
         "group": "🎯 复读触发",
@@ -35,10 +35,10 @@
     },
     "allow_same_user": {
         "group": "🎯 复读触发",
-        "description": "允许同一个人连续触发",
+        "description": "允许同一成员连续计数",
         "type": "bool",
         "default": true,
-        "hint": "开启后，同一成员连续发送相同内容也会计数；关闭后需要不同成员参与，更接近自然复读。"
+        "hint": "开启后，同一成员连续发送相同内容也会累计触发进度；关闭后必须由不同成员参与，更接近自然复读。"
     },
     "min_message_length": {
         "group": "🎯 复读触发",
@@ -169,7 +169,7 @@
         "description": "不触发复读的用户 QQ",
         "type": "text",
         "default": "",
-        "hint": "这些用户发送的消息不会触发复读，多个 QQ 用逗号或换行分隔。该用户仍可参与抽取玩法。"
+        "hint": "这些用户发送的消息不会进入复读判定，多个 QQ 用逗号或换行分隔。只影响复读，该用户仍可参与关系玩法。"
     },
     "enable_husband": {
         "group": "💕 抽取玩法",
@@ -187,7 +187,7 @@
     },
     "husband_daily_limit": {
         "group": "💕 抽取玩法",
-        "description": "每人每日随机抽取次数",
+        "description": "每人每群每日随机抽取次数",
         "type": "int",
         "default": 10,
         "min": 1,
@@ -228,12 +228,12 @@
     },
     "max_records": {
         "group": "💕 抽取玩法",
-        "description": "随机候选池人数上限",
+        "description": "活跃候选池人数上限",
         "type": "int",
         "default": 500,
         "min": 0,
         "max": 10000,
-        "hint": "活跃候选人数超过该值时随机截取，避免超大群计算过慢。0 表示不限制；普通群建议保持 500。"
+        "hint": "使用“仅活跃成员”模式时，候选人数超过该值会随机截取，避免超大群计算过慢。0 表示不限制；普通群建议保持 500。"
     },
     "whitelist_groups": {
         "group": "💕 抽取玩法",
@@ -260,7 +260,7 @@
     },
     "husband_force_daily": {
         "group": "💍 强娶与求婚",
-        "description": "每群每日强娶次数",
+        "description": "每人每群每日强娶次数",
         "type": "int",
         "default": 3,
         "min": 0,
@@ -269,7 +269,7 @@
     },
     "husband_propose_daily": {
         "group": "💍 强娶与求婚",
-        "description": "每日求婚次数",
+        "description": "每人每日求婚次数（全群共享）",
         "type": "int",
         "default": 3,
         "min": 0,
@@ -278,7 +278,7 @@
     },
     "husband_propose_cd": {
         "group": "💍 强娶与求婚",
-        "description": "求婚冷却（秒）",
+        "description": "求婚冷却（秒，全群共享）",
         "type": "int",
         "default": 86400,
         "min": 0,

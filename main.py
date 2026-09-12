@@ -16,7 +16,7 @@ from astrbot.api import AstrBotConfig
 
 logger = logging.getLogger("astrbot")
 
-PLUGIN_NAME = "RepeatPlus-Enterprise"
+PLUGIN_NAME = "RepeatProMax-Enterprise"
 LOG_PREFIX = f"[{PLUGIN_NAME}]"
 DEFAULT_COOLDOWN = 10
 CLEANUP_INTERVAL = 3600
@@ -348,7 +348,7 @@ class CustomTextStrategy(InterruptStrategy):
         if intensity > 1: msg += "！" * min(intensity - 1, 5)
         await event.send(event.plain_result(msg))
 
-class RepeatPlusPlugin(Star):
+class RepeatProMaxPlugin(Star):
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -542,11 +542,11 @@ class RepeatPlusPlugin(Star):
     # ============================================================
     def _command_once(self, event: AstrMessageEvent, key: str) -> bool:
         """确保同一条消息只进入一次关键词/命令处理路径。"""
-        claims = getattr(event, "_repeat_plus_command_claims", None)
+        claims = getattr(event, "_repeat_promax_command_claims", None)
         if claims is None:
             claims = set()
             try:
-                setattr(event, "_repeat_plus_command_claims", claims)
+                setattr(event, "_repeat_promax_command_claims", claims)
             except Exception:
                 claims = None
 

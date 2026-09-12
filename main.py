@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AstrBot 复读增强插件 v2.1.0 — 强娶校验、文案扩充与稳定性优化"""
+"""AstrBot 复读增强插件 ProMax v2.1.1 — 强娶校验、文案扩充与稳定性优化"""
 
 import random, logging, time, re, copy, asyncio, json, os
 from typing import Dict, List, Set, Optional, Tuple, Any
@@ -425,7 +425,7 @@ class RepeatProMaxPlugin(Star):
         # 关键词路由表
         self._build_hub_keywords()
 
-        self._log(logging.INFO, "插件已加载 v2.1.0")
+        self._log(logging.INFO, "插件已加载 ProMax v2.1.1")
 
     # ============================================================
     # 数据持久化

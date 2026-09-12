@@ -1,8 +1,8 @@
 name: astrbot_plugin_repeat_promax
-display_name: QQ群复读增强插件
+display_name: QQ群复读增强插件 ProMax
 desc: QQ 群复读增强插件，支持文本/图片/表情复读、趣味打断、统计、抽老公/老婆、群成员强娶、求婚、羁绊排行、关系图和数据持久化。
 short_desc: 智能复读与群聊羁绊玩法，支持抽取、强娶、求婚、关系图及可视化配置。
-version: v2.1.0
+version: v2.1.1
 author: AstrBot Community
 repo: https://github.com/XunShu1412/astrbot-repeat-promax
 astrbot_version: ">=4.0.0"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AstrBot 复读增强插件 v2.0.5 — 性能优化：独立锁/合并遍历/脏标记持久化"""
+"""AstrBot 复读增强插件 v2.1.0 — 强娶校验、文案扩充与稳定性优化"""
 
 import random, logging, time, re, copy, asyncio, json, os
 from typing import Dict, List, Set, Optional, Tuple, Any
@@ -43,132 +43,250 @@ MAX_RECORDS_DEFAULT = 500
 # 数据持久化目录
 _DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
-# 抽老公/老婆话术模板 — 极简符号风
-# 老婆模式通过 _T() 运行时替换: 老公→老婆, 他→她, 夫君→娘子, 真命天子→真命天女, 男人们→女人们, 一天一夫→一天一妻
+# 抽老公/老婆话术模板 — 轻松群聊风
+# 老婆模式通过 _T() 运行时替换性别词，业务逻辑只维护一套模板。
 _HUB_DRAW_ALREADY = [
     "💕 {user} 今天已经有老公了~\n【{husband}】就是你的今日夫君！\n专一是美德 ✨\n>> /我的老公 查看记录",
-    "🔒 {user} 今天已绑定！\n【{husband}】你的真命天子！\n再来拆散人家不好吧…\n>> /我的老公 查看记录",
-    "💍 今日夫君已就位！\n【{husband}】就是 {user} 的现任！\n重婚犯法！明天赶早~\n>> /我的老公 查看记录",
-    "📜 婚姻登记处提醒：\n【{husband}】{user} 今天已领证！\n一天一夫，群规如山！\n>> /我的老公 查看记录",
-    "🕊️ {user} 的今日老公：【{husband}】\n别贪心，明天再换！\n珍惜眼前人 ❤️\n>> /我的老公 查看记录",
+    "🔒 今日羁绊已锁定！\n{user} 与【{husband}】正在营业中。\n明天再来刷新缘分吧~",
+    "💍 今日夫君已就位！\n【{husband}】就是 {user} 的现任。\n今天先好好相处，明天再抽！",
+    "📜 羁绊登记处提醒：\n{user} 今日已和【{husband}】完成登记。\n>> /我的老公 查看详情",
+    "🕊️ {user} 的今日老公：【{husband}】\n缘分已经送达，请注意查收 ❤️",
+    "🌙 今日缘分不换班：\n【{husband}】仍是 {user} 的老公。\n想看全部记录请用 /我的老公",
+    "📌 系统检测到已有羁绊：\n{user} ×【{husband}】\n今日名额已经使用啦~",
+    "🍬 再抽也不会变哦！\n{user} 今天认领的是【{husband}】。\n把机会留到明天吧~",
 ]
 _HUB_DRAW_ALREADY_MULTI = [
-    "你今天已经抽了 {count} 次老公了！\n最近一位：【{husband}】\n明天再来吧~\n>> /我的老公 查看全部",
-    "今日名额已用完！({count}次)\n现任老公：【{husband}】\n群里的男人们已被你抽遍了…\n>> /我的老公 查看全部",
-    "够了够了！今天已经抽了 {count} 个！\n最新入宫：【{husband}】\n给他留点面子吧 😅\n>> /我的老公 查看全部",
-    "你的后宫已经满了！({count}位)\n最新入宫：【{husband}】\n明天再来选秀吧~\n>> /我的老公 查看全部",
-    "今日手气不错嘛，{count} 个老公了！\n最近一位：【{husband}】\n雨露均沾，别偏心~\n>> /我的老公 查看全部",
+    "今天已经抽了 {count} 次老公啦！\n最近一位：【{husband}】\n名额用完，明天再来~",
+    "🎫 今日抽取券已清空（{count} 次）\n最新羁绊：【{husband}】\n>> /我的老公 查看全部",
+    "📋 今日名单已经排满，共 {count} 位。\n最后登场的是【{husband}】。",
+    "🌟 今日缘分额度已达上限：{count} 次\n最近一次抽到【{husband}】。",
+    "🧺 今日收获满满：已经抽取 {count} 次。\n最后一位是【{husband}】，请明天再来！",
+    "⏰ 今日抽取时间结束！\n共抽取 {count} 次，最近结果：【{husband}】。",
+    "🪄 魔法次数已经用完（共 {count} 次）\n最后召唤到【{husband}】。",
 ]
 _HUB_DRAW_RESULT = [
-    "🌸 天降良缘！\n【{husband}】就是 {user} 的今日老公！\n{suffix}",
-    "🎯 命运之轮转动！\n【{husband}】{user} 抽中了作为今日老公！\n{suffix}",
-    "💘 缘分到了！\n【{husband}】就是 {user} 的真命天子！\n{suffix}",
-    "🎪 群友大转盘开奖！\n【{husband}】{user} 喜提老公一枚！\n{suffix}",
-    "🎲 骰子已掷出！\n【{husband}】{user} 的本日伴侣！\n{suffix}",
-    "📨 系统提示：{user} 收到一份老公快递\n【{husband}】请签收！\n{suffix}",
+    "🌸 天降良缘！\n{user} 今天抽到的是【{husband}】！\n{suffix}",
+    "🎯 命运之轮停下了！\n【{husband}】成为 {user} 的今日老公。\n{suffix}",
+    "💘 缘分已送达！\n{user} 与【{husband}】今日成功配对。\n{suffix}",
+    "🎪 群友转盘开奖！\n{user} 喜提【{husband}】一位。\n{suffix}",
+    "🎲 骰子落定！\n{user} 的本日伴侣是【{husband}】。\n{suffix}",
+    "📨 今日羁绊快递已签收：\n收件人 {user}，内容【{husband}】。\n{suffix}",
+    "✨ 星星替你做了决定：\n【{husband}】就是 {user} 的今日老公！\n{suffix}",
+    "🧭 缘分导航完成：\n{user} 已成功定位到【{husband}】。\n{suffix}",
+    "🎉 配对成功！\n今日组合：{user} ×【{husband}】\n{suffix}",
+    "🌈 今日好运加载完毕：\n【{husband}】来到 {user} 身边。\n{suffix}",
 ]
 _HUB_DRAW_EMPTY = [
-    "😢 老公池空空如也…\n群友们都潜水了，快出来冒个泡吧！\n>> 管理员可开启「不限制活跃」让潜水党也能被抽到",
-    "🏜️ 沙漠中找不到老公…\n需要有人在群里说话（30天内）才能抽哦~\n>> 或让管理开启「不限制活跃」模式",
-    "🌊 大海捞老公…捞了个空\n快让群友们活跃起来吧！\n>> 管理面板可开启全群抽取",
-    "🕳️ 老公池干涸了！最近没人说话…\n老公都跑光了！\n>> 管理员可关闭「仅活跃成员」限制",
-    "📭 今日老公库存告急！\n活跃群友不够抽了，让大家冒个泡吧~\n>> 或开启全群抽取模式",
+    "😢 老公池空空如也……\n最近 {days} 天没有足够的活跃群友。\n>> 管理员可切换为全群抽取",
+    "🏜️ 暂时找不到可抽取成员。\n需要群友在最近 {days} 天内发过言。\n>> 或关闭「仅活跃成员」",
+    "🌊 缘分池还没热起来。\n让大家先在群里冒个泡吧！",
+    "📭 今日候选池暂无库存。\n随机抽取只会选择最近 {days} 天活跃的成员。",
+    "🫧 潜水党太多，缘分雷达没有信号。\n>> /不限制成员抽取 可切换全群模式",
+    "🌙 暂无符合条件的候选人。\n排除名单、机器人设置和活跃天数都会影响随机抽取。",
 ]
 _HUB_DRAW_SUFFIX = [
-    "好好宠他，别让他跑了 ❤️\n🎫 剩余次数 {remain} 次",
-    "记得给他买奶茶 🧋\n🎫 剩余次数 {remain} 次",
-    "今天的幸福就交给你了！\n🎫 剩余次数 {remain} 次",
-    "请对人家负责哦 🤝\n🎫 剩余次数 {remain} 次",
-    "今晚加个鸡腿 🍗\n🎫 剩余次数 {remain} 次",
-    "把好运分享给他吧 ✨\n🎫 剩余次数 {remain} 次",
+    "好好相处，别让缘分溜走 ❤️\n🎫 剩余次数 {remain} 次",
+    "记得给人家买杯奶茶 🧋\n🎫 剩余次数 {remain} 次",
+    "今天的快乐就交给你们了！\n🎫 剩余次数 {remain} 次",
+    "请认真对待这份随机缘分 🤝\n🎫 剩余次数 {remain} 次",
+    "今晚记得加个鸡腿 🍗\n🎫 剩余次数 {remain} 次",
+    "把好运也分享给对方吧 ✨\n🎫 剩余次数 {remain} 次",
+    "今日限定组合，记得好好营业~\n🎫 剩余次数 {remain} 次",
+    "缘分已生效，有效期到今晚十二点 🌙\n🎫 剩余次数 {remain} 次",
+    "截图留念吧，这可是今天的命定结果 📸\n🎫 剩余次数 {remain} 次",
+    "愿你们今天聊天不冷场！\n🎫 剩余次数 {remain} 次",
 ]
 _HUB_FORCE_OK = [
-    "💍 {user} 霸气宣言！\n【{target}】已被捕获为老公！\n⏳ 冷却时间：{cd} 天\n>> /老公帮助 查看指令",
-    "⚡ {user} 发动了「强制绑定」！\n【{target}】成功捕获为老公！\n⏳ 冷却时间：{cd} 天\n>> /老公帮助 查看指令",
-    "🔨 {user} 一锤定音！\n【{target}】已被钦定为老公！\n⏳ 冷却时间：{cd} 天\n>> /老公帮助 查看指令",
-    "🦍 {user} 扛起【{target}】就跑！\n「从今天起你就是我老公了！」\n⏳ 冷却时间：{cd} 天\n>> /老公帮助 查看指令",
-    "🎣 {user} 撒下天罗地网！\n【{target}】被捕获为专属老公！\n⏳ 冷却时间：{cd} 天\n>> /老公帮助 查看指令",
-    "🏴‍☠️ {user} 劫持成功！\n【{target}】已被押送至婚姻登记处！\n⏳ 冷却时间：{cd} 天\n>> /老公帮助 查看指令",
+    "💍 {user} 发出坚定宣言！\n【{target}】已成为今日老公。\n⏳ 冷却时间：{cd} 天",
+    "⚡ {user} 发动「强制绑定」！\n与【{target}】成功建立羁绊。\n⏳ 冷却时间：{cd} 天",
+    "🔨 {user} 一锤定音！\n【{target}】已被指定为老公。\n⏳ 冷却时间：{cd} 天",
+    "🎯 {user} 精准锁定【{target}】！\n本次强娶登记成功。\n⏳ 冷却时间：{cd} 天",
+    "🎣 缘分不用等，{user} 主动出击！\n【{target}】已加入今日名册。\n⏳ 冷却时间：{cd} 天",
+    "📜 羁绊登记完成：\n{user} ×【{target}】\n⏳ 冷却时间：{cd} 天",
+    "🌹 {user} 把选择权握在了自己手里！\n目标【{target}】，绑定成功。\n⏳ 冷却时间：{cd} 天",
+    "🚀 {user} 跳过随机环节，直接选择【{target}】！\n⏳ 冷却时间：{cd} 天",
+    "🧲 今日缘分被 {user} 强行校准：\n结果锁定为【{target}】。\n⏳ 冷却时间：{cd} 天",
+    "🎊 强娶成功！\n{user} 与【{target}】的羁绊已写入记录。\n⏳ 冷却时间：{cd} 天",
 ]
 _HUB_FORCE_CD = [
-    "⏳ 强娶技能冷却中…\n还需等待 {d}天{h}小时（冷却期 {cd} 天）\n>> /老公帮助 查看指令",
-    "🧊 强娶之力还在恢复中…\n{d}天{h}小时后才能再次发动！\n冷却期：{cd} 天\n>> /老公帮助 查看指令",
-    "😤 冷静！强娶是有代价的！\n还需 {d}天{h}小时才能再次使用\n冷却期：{cd} 天\n>> /老公帮助 查看指令",
-    "🛑 强娶许可证已过期！\n{d}天{h}小时后自动续期\n冷却期：{cd} 天\n>> /老公帮助 查看指令",
-    "🔋 强娶能量条：充电中…\n还需 {d}天{h}小时充满\n冷却期：{cd} 天\n>> /老公帮助 查看指令",
+    "⏳ 强娶技能冷却中……\n还需等待 {d}天{h}小时（冷却期 {cd} 天）",
+    "🧊 强娶之力正在恢复。\n{d}天{h}小时后可以再次使用。",
+    "🛑 今日不能连续发动强娶。\n剩余冷却：{d}天{h}小时。",
+    "🔋 强娶能量补充中……\n距离充满还有 {d}天{h}小时。",
+    "🗓️ 下一次强娶预约在 {d}天{h}小时后。\n冷却期：{cd} 天",
+    "🌙 缘分也需要休息。\n请在 {d}天{h}小时后再来。",
+    "📌 强娶许可证暂未刷新。\n剩余 {d}天{h}小时。",
+]
+_HUB_FORCE_DAILY = [
+    "⏰ 今日强娶次数已用完（{count}/{limit}）。\n明天再来选择心仪对象吧！",
+    "🎫 今天的强娶券已经清空，共使用 {count} 次。",
+    "📋 今日强娶名额已满：{count}/{limit}。\n新的名额将在明天刷新。",
+    "🌙 今天先到这里吧，强娶次数已经达到 {limit} 次。",
+    "🛑 今日强娶额度不足。\n已使用 {count} 次，上限 {limit} 次。",
 ]
 _HUB_FORCE_NO_TARGET = [
-    "⚠️ 请指定强娶目标！\n格式：/强娶老公 @用户\n>> /老公帮助 查看指令",
-    "🎯 你要强娶谁？请 @ 对方！\n格式：/强娶老公 @用户\n>> /老公帮助 查看指令",
-    "🤷 没有目标怎么强娶？\n请 @ 你想要强娶的对象！\n>> /老公帮助 查看指令",
-    "❓ 强娶谁？@ 他！\n格式：/强娶老公 @用户\n>> /老公帮助 查看指令",
-    "👀 你倒是 @ 个人啊！\n格式：/强娶老公 @目标用户\n>> /老公帮助 查看指令",
+    "⚠️ 请先 @ 你想强娶的群成员。\n格式：/强娶老公 @用户",
+    "🎯 目标是谁？请在指令后 @ 对方！",
+    "🤷 没有指定对象，强娶无法开始。\n格式：/强娶 @用户",
+    "❓ 请补充一个本群成员作为目标。",
+    "👀 我已经准备好了，就差你 @ 一个人。",
+    "📌 示例：/强娶老公 @群友",
 ]
 _HUB_FORCE_SELF = [
-    "🤔 你不能强娶自己哦！\n请 @ 别人来强娶~\n>> /老公帮助 查看指令",
-    "🙅 自攻自受禁止！\n请 @ 别人来强娶~\n>> /老公帮助 查看指令",
-    "🪞 对着镜子说「嫁给我」是没有用的…\n请 @ 别人！\n>> /老公帮助 查看指令",
-    "🚫 自娶禁止！\n法律法规不允许自己娶自己！\n>> /老公帮助 查看指令",
-    "🔄 强娶自己？\n你搁这搞自循环呢？@ 别人！\n>> /老公帮助 查看指令",
+    "🤔 不能把自己设为强娶目标哦，请 @ 另一位群友。",
+    "🪞 镜子里的自己不算目标，换个人试试吧！",
+    "🔄 检测到自我循环，强娶已取消。",
+    "🙅 自己不能和自己建立这条羁绊。",
+    "🎯 目标和发起者相同，请重新选择。",
+    "🌱 先把缘分留给另一位群友吧~",
 ]
-_HUB_FORCE_NOT_ACTIVE = [
-    "😢 目标用户不在候选池中\n他可能已潜水超过 30 天…\n>> 管理员可关闭「仅活跃成员」来解除限制",
-    "👻 目标已经潜水太久了！\n30 天内未发言的群友无法被强娶\n>> 或让管理开启全群抽取模式",
-    "🏊 目标潜水太深，捞不上来…\n需要对方在 30 天内冒过泡~\n>> 管理面板可关闭活跃限制",
-    "🔍 在候选池中找不到该用户\n对方可能被排除或长期潜水\n>> 管理员可调整「仅活跃成员」设置",
+_HUB_FORCE_EXCLUDED = [
+    "🚫 该成员已在参与排除名单中，无法被强娶。",
+    "🛡️ 目标当前不参与抽取与强娶，请选择其他群友。",
+    "📌 这位成员被管理员排除了，不能建立强娶记录。",
+    "🌙 目标选择了暂不参与，换一个人试试吧。",
+]
+_HUB_FORCE_NOT_MEMBER = [
+    "🔍 没有在当前群找到该成员，强娶已取消。",
+    "🚪 目标似乎已经不在本群，请重新选择。",
+    "📋 群成员名单中不存在这个账号。",
+    "⚠️ 只能强娶当前群里的成员。",
+    "🧭 群成员校验未通过，请确认 @ 的对象仍在群内。",
+]
+_HUB_FORCE_VERIFY_FAILED = [
+    "⚠️ 暂时无法验证群成员身份，请稍后再试。\n本次不会消耗强娶次数或冷却。",
+    "🌐 群成员接口暂时没有响应，请稍后重新发送指令。",
+    "🔄 成员校验失败，本次操作已安全取消。",
+]
+_HUB_FORCE_BOT_DISABLED = [
+    "🤖 机器人今天只负责见证，不参与强娶哦~",
+    "🛡️ 当前未开启「允许与机器人建立关系」。",
+    "⚙️ 想强娶机器人，需要管理员先在配置中开启对应选项。",
+    "📡 机器人拒绝接收这份强娶申请——至少配置还没同意。",
 ]
 _HUB_MY_EMPTY = [
-    "💕 你今天还没有老公呢~\n快用 /今日老公 抽一个吧！\n🎫 剩余次数 {remain} 次\n>> /老公帮助 查看指令",
-    "💕 单身贵族！今日老公名额还未使用~\n发送 /今日老公 邂逅真命天子！\n🎫 剩余次数 {remain} 次\n>> /老公帮助 查看指令",
-    "💕 孤独的 {user}…\n今天还没有老公陪伴呢~\n快 /今日老公 抽一个吧！\n🎫 剩余次数 {remain} 次\n>> /老公帮助 查看指令",
-    "💕 今日老公位空缺中！\n{user} 还在等什么？/今日老公 来一发！\n🎫 剩余次数 {remain} 次\n>> /老公帮助 查看指令",
-    "💔 今天还是一个人…\n没关系，/今日老公 帮你脱单！\n🎫 剩余次数 {remain} 次\n>> /老公帮助 查看指令",
+    "💕 你今天还没有老公，快用 /今日老公 抽一个吧！\n🎫 剩余次数 {remain} 次",
+    "🌤️ 今日羁绊栏还是空的。\n发送 /今日老公 开启今天的缘分。\n🎫 剩余次数 {remain} 次",
+    "📭 暂无今日记录。\n随机抽取和强娶成功后会显示在这里。\n🎫 剩余次数 {remain} 次",
+    "✨ 今日缘分尚未加载，试试 /今日老公。\n🎫 剩余次数 {remain} 次",
+    "🧭 还没找到今天的老公？让命运转盘来决定吧。\n🎫 剩余次数 {remain} 次",
+    "🌱 今日关系从零开始。\n🎫 剩余次数 {remain} 次",
+    "🎲 骰子还没有掷出，今天的结果等你来揭晓。\n🎫 剩余次数 {remain} 次",
 ]
 _HUB_MY_HEADER = [
-    "💕 你今天的老公记录：",
-    "📋 今日羁绊记录：",
-    "💘 你的今日老公一览：",
-    "📜 今日夫君名册：",
-    "💝 今日情缘记录：",
+    "💕 你今天的老公记录：", "📋 今日羁绊记录：", "💘 今日缘分一览：",
+    "📜 今日夫君名册：", "💝 今天建立的关系：", "🗂️ 本日羁绊档案：", "🌟 今日配对结果：",
 ]
 _HUB_RANK_TITLE = [
-    "🏆 群内最受欢迎老公榜",
-    "🏆 最强老公争夺榜",
-    "🏆 群内老公人气榜",
-    "🏆 老公被抢次数天梯榜",
-    "🏆 老公排行榜（被强娶次数）",
+    "🏆 群内最受欢迎老公榜", "🏆 强娶人气榜", "🏆 群内老公热度榜",
+    "🏆 被选择次数天梯榜", "🏆 今日羁绊人气榜", "🏆 群友魅力排行榜",
 ]
 _HUB_RANK_EMPTY = [
-    "本群暂无强娶记录\n快来 /强娶老公 抢人吧！\n>> /老公帮助 查看指令",
-    "还没有人被强娶过…\n做第一个吃螃蟹的人？/强娶老公\n>> /老公帮助 查看指令",
-    "空空如也！\n没有人被强娶过，快去 /强娶老公 打破僵局！\n>> /老公帮助 查看指令",
-    "📭 排行榜为空！\n你是第一个来的人，快 /强娶老公 抢占先机！\n>> /老公帮助 查看指令",
-    "🏜️ 一片荒芜…\n还没有人发动过强娶，开疆拓土就靠你了！\n>> /老公帮助 查看指令",
+    "本群暂无强娶记录，快来 /强娶老公 建立第一条羁绊！",
+    "还没有人登上榜单，第一名正在等待出现。",
+    "📭 排行榜暂时为空，使用 /强娶老公 后会自动统计。",
+    "🏜️ 榜单还是一片空白，开局就靠你了。",
+    "🌱 人气榜正在萌芽，第一条记录会是谁呢？",
+    "🎯 暂无数据，先选择一位本群成员试试吧。",
 ]
 _HUB_HELP_INTRO = [
-    "💕 抽老公系统帮助",
-    "💕 老公系统使用指南",
-    "💕 抽老公功能说明",
-    "💕 老公系统操作手册",
+    "💕 抽老公系统帮助", "💕 羁绊玩法使用指南", "💕 今日配对功能说明",
+    "💕 群聊缘分操作手册", "💕 抽取与强娶指南",
 ]
-_HUB_MY_TAG_DRAW = ["✨ 缘分抽选", "🎯 天降", "🎲 命定", "🌸 随机邂逅", "🎪 抽取"]
-_HUB_MY_TAG_FORCE = ["🔨 强制绑定", "💍 霸道抢人", "⚡ 武力夺取", "🏴‍☠️ 直接拿下", "🦍 强娶"]
-_HUB_MY_TAG_PROPOSE = ["💒 求婚成对", "💝 情投意合", "💌 双向奔赴", "🌹 玫瑰之约", "💍 求婚成功"]
+_HUB_MY_TAG_DRAW = ["✨ 随机抽取", "🎯 天降缘分", "🎲 命定结果", "🌸 随机邂逅", "🎪 转盘抽取", "🧭 缘分导航"]
+_HUB_MY_TAG_FORCE = ["🔨 强制绑定", "💍 主动选择", "⚡ 精准锁定", "📜 强娶登记", "🧲 缘分校准", "🎯 指定羁绊"]
+_HUB_MY_TAG_PROPOSE = ["💒 求婚成对", "💝 情投意合", "💌 双向奔赴", "🌹 玫瑰之约", "💍 求婚成功", "🎊 喜结连理"]
+
+_HUB_PROPOSE_NO_TARGET = [
+    "💍 请 @ 你想要求婚的对象。\n格式：/求婚 @用户",
+    "🌹 花已经准备好了，还需要你指定收花的人。",
+    "📨 求婚申请缺少对象，请在指令后 @ 对方。",
+    "🎯 请先选择一位群友，再发起求婚。",
+]
+_HUB_PROPOSE_SELF = [
+    "🤔 不能向自己求婚哦，换一位心仪的群友吧！",
+    "🪞 镜子里的自己无法接受这份求婚。",
+    "🔄 求婚目标与发起者相同，申请已取消。",
+    "🌹 这束花要送给另一位群友才行。",
+]
+_HUB_PROPOSE_BOT_DISABLED = [
+    "🤖 当前不允许向机器人求婚哦~",
+    "🛡️ 管理员尚未开启「允许与机器人建立关系」。",
+    "📡 机器人暂时只担任婚礼主持。",
+    "⚙️ 开启机器人关系选项后再来试试吧。",
+]
+_HUB_PROPOSE_EXCLUDED = [
+    "🚫 该成员当前不参与关系玩法，无法向其求婚。",
+    "🛡️ 目标位于参与排除名单中，请尊重对方的选择。",
+    "🌙 这位成员暂不接收求婚申请。",
+    "📌 管理员已将该账号排除，请选择其他对象。",
+]
+_HUB_PROPOSE_PENDING = [
+    "💍 对方已经有一份待处理的求婚，请等待回应。",
+    "📨 目标的求婚收件箱正忙，请稍后再试。",
+    "⏳ 已有求婚等待对方处理，暂时不能覆盖。",
+    "🌹 请给对方一点回应时间，再来发起新的求婚。",
+]
+_HUB_PROPOSE_NONE = [
+    "💍 你当前没有待处理的求婚请求。",
+    "📭 求婚收件箱是空的。",
+    "🔍 没有找到需要你回应的求婚。",
+    "🌙 暂无等待接受或拒绝的请求。",
+]
+_HUB_PROPOSE_INVITE = [
+    "💍 {user} 向你发起求婚！\n\n「从今天起，愿意成为我的{label}吗？」\n\n>> 回复 /接受求婚 或 /拒绝求婚",
+    "🌹 {user} 把花递到了你面前：\n\n「愿意和我建立今天的羁绊吗？」\n\n>> /接受求婚 或 /拒绝求婚",
+    "💌 你收到一封来自 {user} 的求婚信！\n\n目标身份：{label}\n>> 请在 5 分钟内回应",
+    "✨ 群聊见证这一刻：\n{user} 正式向你求婚！\n\n>> /接受求婚 或 /拒绝求婚",
+    "🎤 {user} 鼓起勇气说道：\n「我的今日{label}，可以是你吗？」\n\n>> 请在 5 分钟内回应",
+    "📜 求婚申请已送达：\n发起人：{user}\n申请关系：{label}\n\n>> /接受求婚 或 /拒绝求婚",
+    "🌙 今晚的月色很适合告白。\n{user} 想邀请你成为今日{label}。\n\n>> 请及时回应",
+    "🎊 突发喜讯候选：\n{user} 向你发起了认真又浪漫的求婚！\n\n>> /接受求婚 或 /拒绝求婚",
+]
+_HUB_PROPOSE_ACCEPT = [
+    "💒 恭喜！{from_name} 和 {to_name} 喜结连理！\n从今天起，{to_name} 就是 {from_name} 的{label}了！🎉",
+    "🎊 求婚成功！\n{from_name} × {to_name} 的羁绊正式生效。",
+    "🌹 {to_name} 接受了 {from_name} 的求婚！\n愿今天的群聊充满甜度~",
+    "✨ 双向奔赴达成！\n{from_name} 与 {to_name} 已写入今日关系记录。",
+    "💍 一声同意，缘分落定。\n{to_name} 成为了 {from_name} 的今日{label}。",
+    "📜 群聊婚姻登记处宣布：\n{from_name} 和 {to_name} 配对成功！",
+]
+_HUB_PROPOSE_REJECT = [
+    "💔 {from_name} 的求婚被婉拒了。\n求婚次数和冷却已返还，可以重新选择。",
+    "🌧️ 很遗憾，这次没有牵手成功。\n{from_name} 的次数已经返还。",
+    "📨 对方暂时没有接受 {from_name} 的求婚。\n本次额度已退回。",
+    "🌙 缘分还没到，{from_name} 可以稍后再试。",
+    "🍃 这次告白轻轻落空，但机会已经返还。",
+    "🫶 尊重对方的选择，下一段缘分也许正在路上。",
+]
+_HUB_PROPOSE_EXPIRED = [
+    "⏰ 求婚请求已超过 5 分钟，请重新发起。\n求婚次数和冷却已返还。",
+    "⌛ 这份求婚已经过期，额度已自动退回。",
+    "📭 对方未在有效时间内回应，请再次发送求婚。",
+    "🌙 求婚等待时间结束，本次申请已安全取消。",
+]
 
 # 性别替换规则 — 老婆模式运行时替换（按长度降序，避免短词覆盖长词）
 _GENDER_SUB = [("真命天子", "真命天女"), ("一天一夫", "一天一妻"), ("男人们", "女人们"), ("夫君", "娘子"), ("老公", "老婆"), ("他", "她")]
 
-# 模板映射表 — all keys map to single (husband) array; _T() applies gender sub for wife mode
 _TEMPLATE_MAP = {
     "draw_already": _HUB_DRAW_ALREADY, "draw_already_multi": _HUB_DRAW_ALREADY_MULTI,
     "draw_result": _HUB_DRAW_RESULT, "draw_empty": _HUB_DRAW_EMPTY,
     "draw_suffix": _HUB_DRAW_SUFFIX, "force_ok": _HUB_FORCE_OK,
-    "force_cd": _HUB_FORCE_CD, "force_no_target": _HUB_FORCE_NO_TARGET,
-    "force_self": _HUB_FORCE_SELF, "force_not_active": _HUB_FORCE_NOT_ACTIVE,
+    "force_cd": _HUB_FORCE_CD, "force_daily": _HUB_FORCE_DAILY,
+    "force_no_target": _HUB_FORCE_NO_TARGET, "force_self": _HUB_FORCE_SELF,
+    "force_excluded": _HUB_FORCE_EXCLUDED, "force_not_member": _HUB_FORCE_NOT_MEMBER,
+    "force_verify_failed": _HUB_FORCE_VERIFY_FAILED, "force_bot_disabled": _HUB_FORCE_BOT_DISABLED,
     "my_empty": _HUB_MY_EMPTY, "my_header": _HUB_MY_HEADER,
     "rank_title": _HUB_RANK_TITLE, "rank_empty": _HUB_RANK_EMPTY,
     "help_intro": _HUB_HELP_INTRO, "my_tag_draw": _HUB_MY_TAG_DRAW,
     "my_tag_force": _HUB_MY_TAG_FORCE, "my_tag_propose": _HUB_MY_TAG_PROPOSE,
+    "propose_no_target": _HUB_PROPOSE_NO_TARGET, "propose_self": _HUB_PROPOSE_SELF,
+    "propose_bot_disabled": _HUB_PROPOSE_BOT_DISABLED,
+    "propose_excluded": _HUB_PROPOSE_EXCLUDED, "propose_pending": _HUB_PROPOSE_PENDING,
+    "propose_none": _HUB_PROPOSE_NONE, "propose_invite": _HUB_PROPOSE_INVITE,
+    "propose_accept": _HUB_PROPOSE_ACCEPT, "propose_reject": _HUB_PROPOSE_REJECT,
+    "propose_expired": _HUB_PROPOSE_EXPIRED,
 }
 
 # 指令关键字黑名单
@@ -307,7 +425,7 @@ class RepeatPlusPlugin(Star):
         # 关键词路由表
         self._build_hub_keywords()
 
-        self._log(logging.INFO, "插件已加载 v2.0.5")
+        self._log(logging.INFO, "插件已加载 v2.1.0")
 
     # ============================================================
     # 数据持久化
@@ -517,6 +635,40 @@ class RepeatPlusPlugin(Star):
 
     def _hub_enabled(self) -> Tuple[bool, bool]:
         return self._cfg.get("enable_husband", True), self._cfg.get("enable_wife", True)
+
+    async def _hub_lookup_group_member(
+        self, event: AstrMessageEvent, gid: str, target_id: str, bot_id: str
+    ) -> Tuple[Optional[bool], str]:
+        """校验目标是否仍在本群。True=是，False=明确不是，None=接口不可用。"""
+        cached_info = self._hub_active.get(gid, {}).get(target_id, {})
+        fallback_name = cached_info.get("name", f"用户({target_id})")
+        if target_id == bot_id:
+            return True, cached_info.get("name", "机器人")
+
+        try:
+            if event.get_platform_name() == "aiocqhttp":
+                resp = await event.bot.api.call_action(
+                    "get_group_member_info",
+                    group_id=int(gid),
+                    user_id=int(target_id),
+                    no_cache=False,
+                )
+                data = resp.get("data", resp) if isinstance(resp, dict) else None
+                if isinstance(data, dict) and str(data.get("user_id", "")) == target_id:
+                    member_name = data.get("card") or data.get("nickname") or fallback_name
+                    async with self._hub_active_lock:
+                        info = self._hub_active.setdefault(gid, {}).setdefault(
+                            target_id, {"name": member_name, "ts": 0})
+                        info["name"] = member_name
+                    self._data_dirty = True
+                    return True, member_name
+                return False, fallback_name
+        except Exception as e:
+            self._dbg(f"群成员校验失败: gid={gid}, uid={target_id}, err={e}")
+
+        if target_id in self._hub_active.get(gid, {}):
+            return True, fallback_name
+        return None, fallback_name
 
     async def _sync_config(self) -> None:
         now = time.time()
@@ -1064,7 +1216,9 @@ class RepeatPlusPlugin(Star):
 
         pool = await self._hub_resolve_pool(event, gid, uid, bid)
         if not pool:
-            await event.send(event.plain_result(self._hb("draw_empty", mode)))
+            await event.send(event.plain_result(
+                self._hb("draw_empty", mode).format(
+                    days=self._cfg.get("hub_active_days", 30))))
             return
 
         husband_id = self._hub_weighted_choice(gid, pool)
@@ -1202,14 +1356,21 @@ class RepeatPlusPlugin(Star):
         now = time.time()
 
         bot_id = str(getattr(event.message_obj, 'self_id', ''))
+        if target_id in self._cfg.get("hub_excluded", set()) or target_id == "0":
+            await event.send(event.plain_result(self._hb("force_excluded", mode)))
+            return
         if target_id == bot_id and not self._cfg.get("allow_marry_bot"):
-            await event.send(event.plain_result(f"🤖 机器人不参与强娶{self._hb_label(mode)}哦~")); return
-        pool = await self._hub_resolve_pool(event, gid, uid, bot_id)
-        if target_id not in pool:
-            await event.send(event.plain_result(self._hb("force_not_active", mode)))
+            await event.send(event.plain_result(self._hb("force_bot_disabled", mode)))
             return
 
-        target_name = self._hub_active.get(gid, {}).get(target_id, {}).get("name", f"用户({target_id})")
+        is_member, target_name = await self._hub_lookup_group_member(
+            event, gid, target_id, bot_id)
+        if is_member is False:
+            await event.send(event.plain_result(self._hb("force_not_member", mode)))
+            return
+        if is_member is None:
+            await event.send(event.plain_result(self._hb("force_verify_failed", mode)))
+            return
         user_name = event.get_sender_name() or uid
         avatar_url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={target_id}&spec=640"
 
@@ -1227,7 +1388,8 @@ class RepeatPlusPlugin(Star):
                 today_force = sum(1 for r in today_recs
                                   if r.get("user_id") == uid and r.get("source") == "force")
                 if today_force >= force_daily:
-                    lock_msg = f"⏰ 你今天已经强娶了 {today_force} 次，明天再来吧！(每日上限: {force_daily} 次)"
+                    lock_msg = self._hb("force_daily", mode).format(
+                        count=today_force, limit=force_daily)
             if lock_msg is None:
                 self._hub_force_cd[uid] = now
                 today_recs.append({
@@ -1295,7 +1457,8 @@ class RepeatPlusPlugin(Star):
                 mode = "husband"
             else:
                 await event.send(event.plain_result("❌ 老婆模式未开启，请在管理面板中启用「开启老婆模式」。")); return
-        active_status = "✅ 已关闭（全群可抽）" if not self._cfg.get("hub_require_active", True) else "默认开启（仅活跃成员）"
+        active_status = ("✅ 全群随机抽取" if not self._cfg.get("hub_require_active", True)
+                         else "🔒 随机抽取仅限活跃成员")
         label = self._hb_label(mode)
         force_label = self._hb_label(mode, "强娶老公", "强娶老婆")
         mode_str = "老公+老婆" if (hus and wife) else ("老公" if hus else "老婆")
@@ -1309,7 +1472,7 @@ class RepeatPlusPlugin(Star):
             self._hb("help_intro", mode) + "\n" +
             f"  /今日{label} /抽{label}   随机抽取今日{label}\n" +
             f"  /我的{label} /{label}记录 查看今日抽取记录\n" +
-            f"  /{force_label} @用户    强制与指定用户建立羁绊\n" +
+            f"  /{force_label} @用户    指定本群成员（不受活跃池限制）\n" +
             f"  /{label}排行榜 /{label}排行 被强娶次数排行\n" +
             f"  /不限制成员抽取     切换全群抽取/仅活跃\n" +
             f"  /{label}帮助          查看此帮助\n" +
@@ -1321,6 +1484,7 @@ class RepeatPlusPlugin(Star):
             "\n" +
             "  > 当前模式：" + mode_str + "\n" +
             "  > 活跃限制：" + active_status + "\n" +
+            "  > 活跃限制只影响随机抽取；强娶仅校验群成员和排除名单。\n" +
             "  > 每天可抽次数由管理员设定，强娶有冷却期。\n" +
             "  > 开启关键词触发后，可直接发关键词无需 / 前缀。"))
 
@@ -1362,6 +1526,7 @@ class RepeatPlusPlugin(Star):
         tag = "✅ 全群抽取模式已开启！\n现在抽人会覆盖所有群成员（包括潜水党）"
         if new_val: tag = "🔒 仅活跃成员模式已开启！\n只有最近发言的群友能进入抽取池"
         await event.send(event.plain_result(tag +
+            f"\n💡 此设置只影响随机抽取，强娶始终按本群成员校验。" +
             f"\n>> 快捷切换：/不限制成员抽取\n>> 永久设置：WebUI 管理面板"))
 
     # ============================================================
@@ -1837,7 +2002,7 @@ class RepeatPlusPlugin(Star):
         else:
             hub_section = "💕 抽老公/老婆功能未开启，请在管理面板中启用。\n"
         await event.send(event.plain_result(
-            f"\U0001F4DF 复读插件 v2.0.5 指令帮助\n{'─'*30}\n"
+            f"\U0001F4DF 复读插件 v2.1.0 指令帮助\n{'─'*30}\n"
             f"🔧 管理（仅群聊）\n"
             "  /复读开启          在本群开启复读\n"
             "  /复读关闭          在本群关闭复读\n"
@@ -1845,7 +2010,7 @@ class RepeatPlusPlugin(Star):
             "  /复读统计          本群今日/本周/累计\n"
             f"{'─'*30}\n{hub_section}"
             f"{'─'*30}\n"
-            f"🔥 v2.0.5: 概率衰减加权 / Vis.js CDN / 性能优化\n"
+            f"🔥 v2.1.0: 强娶群成员校验 / 文案扩充 / 稳定性优化\n"
             f"⚙️ 更多参数请在 WebUI 管理面板调整"))
 
     # ============================================================
@@ -1859,15 +2024,17 @@ class RepeatPlusPlugin(Star):
         bid = str(getattr(mo, 'self_id', ''))
         if not gid or (bid and sid == bid): return
 
+        # 活跃追踪先于配置同步，确保首次发言也能进入下一次持久化保存。
+        if sid and sid != "0":
+            async with self._hub_active_lock:
+                self._hub_active.setdefault(gid, {})[sid] = {
+                    "name": event.get_sender_name() or sid,
+                    "ts": time.time(),
+                }
+            self._data_dirty = True
+
         await self._sync_config()
         cfg = self._cfg
-
-        # 抽老公/老婆活跃追踪 — 独立于复读白名单/黑名单，只要发了消息就记录
-        async with self._hub_active_lock:
-            self._hub_active.setdefault(gid, {})[sid] = {
-                "name": event.get_sender_name() or sid,
-                "ts": time.time(),
-            }
 
         # 群组白名单/黑名单检查（仅影响复读功能）
         wl = cfg.get("whitelist_groups", set())

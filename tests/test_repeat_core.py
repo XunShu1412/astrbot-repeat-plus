@@ -7,6 +7,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest.mock import patch
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -233,6 +234,108 @@ async def send_three(plugin, chain_factory, senders=("10001", "10001", "10001"),
 
 
 class RepeatCoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_command_dedup_never_confuses_distinct_events_without_message_id(self):
+        plugin = make_plugin()
+        first = FakeEvent([Plain("抽老婆")], sender="10001")
+        second = FakeEvent([Plain("抽老婆")], sender="10002")
+
+        self.assertTrue(plugin._command_once(first, "draw"))
+        self.assertTrue(plugin._command_once(second, "draw"))
+        self.assertFalse(plugin._command_once(second, "draw"))
+
+        clone_a = FakeEvent([Plain("抽老婆")], sender="10003")
+        clone_b = FakeEvent([Plain("抽老婆")], sender="10003")
+        clone_a.message_obj.message_id = 778899
+        clone_b.message_obj.message_id = 778899
+        self.assertTrue(plugin._command_once(clone_a, "draw"))
+        self.assertFalse(plugin._command_once(clone_b, "draw"))
+
+    async def test_midnight_refreshes_daily_state_but_keeps_timed_cooldowns(self):
+        class FrozenDateTime(datetime):
+            current = datetime(2026, 9, 12, 23, 59, 59)
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        plugin = make_plugin()
+        plugin._hub_draw_usage = {
+            "_date": "2026-09-12", "20001": {"10001": 3, "10002": 2}
+        }
+        plugin._hub_propose_count = {
+            "_date": "2026-09-12", "10001": 3, "10002": 1
+        }
+        plugin._hub_records = {
+            "20001": {"date": "2026-09-12", "records": [
+                {"user_id": "10001", "source": "draw"},
+                {"user_id": "10002", "source": "force"},
+            ]}
+        }
+        plugin._hub_force_cd = {"10001": 12345.0}
+        plugin._hub_propose_cd = {"10001": 23456.0}
+        plugin._hub_drawn_recent = {"20001": {"30001": 34567.0}}
+
+        with patch.object(PLUGIN_MODULE, "datetime", FrozenDateTime):
+            FrozenDateTime.current = datetime(2026, 9, 13, 0, 0, 1)
+            await plugin._hub_sync()
+
+            self.assertEqual(plugin._hub_draw_usage, {"_date": "2026-09-13"})
+            self.assertEqual(plugin._hub_propose_count, {"_date": "2026-09-13"})
+            self.assertEqual(plugin._hub_today("20001"), [])
+            self.assertEqual(plugin._hub_init_today("20001"), [])
+            self.assertEqual(plugin._hub_records["20001"]["date"], "2026-09-13")
+
+        self.assertEqual(plugin._hub_force_cd, {"10001": 12345.0})
+        self.assertEqual(plugin._hub_propose_cd, {"10001": 23456.0})
+        self.assertEqual(plugin._hub_drawn_recent, {"20001": {"30001": 34567.0}})
+
+    async def test_mixed_draw_mode_gets_fresh_quota_on_first_command_after_midnight(self):
+        class FrozenDateTime(datetime):
+            current = datetime(2026, 9, 12, 23, 59, 50)
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        plugin = make_plugin(hub_keyword=True, hub_daily=3)
+        plugin._hub_draw_usage = {"_date": "2026-09-12"}
+        plugin._hub_propose_count = {"_date": "2026-09-12"}
+        targets = ["30001", "30002", "30003", "30004"]
+        plugin._hub_active = {
+            "20001": {
+                target: {"name": f"候选-{target}", "ts": time.time()}
+                for target in targets
+            }
+        }
+
+        async def full_pool(*_):
+            return list(targets)
+
+        selected = iter(targets)
+        plugin._hub_resolve_pool = full_pool
+        plugin._hub_weighted_choice = lambda *_: next(selected)
+        plugin._hub_kw = {
+            "抽老婆": plugin._cmd_wife_draw,
+            "抽老公": plugin._cmd_husband_draw,
+        }
+
+        with patch.object(PLUGIN_MODULE, "datetime", FrozenDateTime):
+            for _ in range(3):
+                await plugin._pipe(FakeEvent([Plain("抽老婆")], sender="10001"))
+            self.assertEqual(plugin._hub_draw_used("20001", "10001"), 3)
+            self.assertEqual(len(plugin._hub_today("20001")), 3)
+
+            FrozenDateTime.current = datetime(2026, 9, 13, 0, 0, 1)
+            next_day = FakeEvent([Plain("抽老公")], sender="10001")
+            await plugin._pipe(next_day)
+
+            self.assertEqual(len(next_day.sent), 1)
+            self.assertEqual(plugin._hub_draw_used("20001", "10001"), 1)
+            records = plugin._hub_today("20001")
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["husband_id"], "30004")
+            self.assertEqual(plugin._hub_records["20001"]["date"], "2026-09-13")
+
     async def test_multiple_users_can_switch_from_wife_draws_to_husband_draws(self):
         plugin = make_plugin(hub_keyword=True, cooldown=10, hub_daily=10)
         targets = [f"3000{i}" for i in range(1, 8)]

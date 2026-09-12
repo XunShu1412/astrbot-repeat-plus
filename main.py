@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AstrBot 复读增强插件 ProMax v2.1.6 — 富媒体发送失败自动降级"""
+"""AstrBot 复读增强插件 ProMax v2.1.7 — 北京时间跨日刷新"""
 
 import random, logging, time, re, copy, asyncio, json, os, hashlib, shutil
 from typing import Dict, List, Set, Optional, Tuple, Any
 from collections import deque
 from difflib import SequenceMatcher
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from astrbot.api.event import filter, AstrMessageEvent
@@ -19,6 +19,7 @@ logger = logging.getLogger("astrbot")
 
 PLUGIN_NAME = "RepeatProMax"
 PLUGIN_ID = "astrbot_plugin_repeat_promax"
+PLUGIN_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 LOG_PREFIX = f"[{PLUGIN_NAME}]"
 DEFAULT_COOLDOWN = 10
 CLEANUP_INTERVAL = 3600
@@ -54,6 +55,15 @@ _PERSISTED_DATA_FILES = (
     "active_users.json", "forced_marriage.json", "wife_records.json",
     "draw_usage.json", "propose_cd.json", "propose_count.json", "proposals.json",
 )
+
+
+def _plugin_now() -> datetime:
+    """统一使用北京时间，避免 Docker/服务器时区导致每日刷新偏移。"""
+    return datetime.now(PLUGIN_TIMEZONE)
+
+
+def _today_key() -> str:
+    return _plugin_now().strftime("%Y-%m-%d")
 
 # 抽老公/老婆话术模板 — 轻松群聊风
 # 老婆模式通过 _T() 运行时替换性别词，业务逻辑只维护一套模板。
@@ -458,7 +468,7 @@ class RepeatProMaxPlugin(Star):
         self._hub_records: Dict[str, Dict[str, Any]] = {}
         # 每日随机抽取额度使用量独立于关系记录，避免强娶/求婚写入时影响次数。
         self._hub_draw_usage: Dict[str, Any] = {
-            "_date": datetime.now().strftime("%Y-%m-%d")
+            "_date": _today_key()
         }
         self._hub_force_cd: Dict[str, float] = {}
         self._hub_last_cleanup = 0.0
@@ -488,7 +498,7 @@ class RepeatProMaxPlugin(Star):
         # 关键词路由表
         self._build_hub_keywords()
 
-        self._log(logging.INFO, "插件已加载 ProMax v2.1.6")
+        self._log(logging.INFO, "插件已加载 ProMax v2.1.7")
 
     # ============================================================
     # 数据持久化
@@ -553,7 +563,7 @@ class RepeatProMaxPlugin(Star):
         recs = self._load_json("wife_records.json", {})
         if isinstance(recs, dict):
             self._hub_records = recs
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = _today_key()
         usage = self._load_json("draw_usage.json", None)
         safe_usage: Dict[str, Any] = {"_date": today}
         if isinstance(usage, dict) and usage.get("_date") == today:
@@ -678,14 +688,26 @@ class RepeatProMaxPlugin(Star):
             except Exception:
                 claims = None
 
+        # 同一事件对象内优先使用随事件保存的声明，既可靠又不依赖消息 ID。
+        if claims is not None:
+            if key in claims:
+                return False
+            claims.add(key)
+
         message_obj = getattr(event, "message_obj", None)
         gid = str(getattr(message_obj, "group_id", ""))
-        message_id = (
-            getattr(message_obj, "message_id", None)
-            or getattr(message_obj, "message_seq", None)
-            or getattr(message_obj, "id", None)
-            or id(event)
-        )
+        message_id = None
+        for attr in ("message_id", "message_seq", "id"):
+            candidate = getattr(message_obj, attr, None)
+            if candidate is not None and candidate != "":
+                message_id = candidate
+                break
+
+        # 没有平台消息 ID 时不能把 Python 对象 id 放进 30 秒去重表：对象释放后
+        # id 可能立即复用，从而把下一位群友的新命令误判成上一条消息。
+        if message_id is None:
+            return True
+
         token = (gid, str(message_id), key)
         now = time.monotonic()
 
@@ -696,11 +718,6 @@ class RepeatProMaxPlugin(Star):
         if token in self._handled_command_events:
             return False
         self._handled_command_events[token] = now
-
-        if claims is not None:
-            if key in claims:
-                return False
-            claims.add(key)
         return True
 
     def _log(self, level: int, msg: str, exc_info: bool = False) -> None:
@@ -977,8 +994,8 @@ class RepeatProMaxPlugin(Star):
             # 抽老公/老婆活跃数据清理
             if now - self._hub_last_cleanup > HUSBAND_CLEANUP_INTERVAL:
                 hub_cutoff = now - self._cfg["hub_active_days"] * 86400
-                today_str = datetime.now().strftime("%Y-%m-%d")
-                yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                today_str = _today_key()
+                yesterday_str = (_plugin_now() - timedelta(days=1)).strftime("%Y-%m-%d")
                 hub_pruned = 0
                 async with self._hub_active_lock:
                     for g in list(self._hub_active.keys()):
@@ -1020,7 +1037,7 @@ class RepeatProMaxPlugin(Star):
                 self._hub_last_cleanup = now
 
             # 每日重置求婚次数
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = _today_key()
             if self._hub_propose_count.get("_date", "") != today:
                 self._hub_propose_count = {"_date": today}
             if self._hub_draw_usage.get("_date", "") != today:
@@ -1324,7 +1341,7 @@ class RepeatProMaxPlugin(Star):
     # 排行榜
     # ============================================================
     def _ts_min(self, mode: str) -> Optional[float]:
-        n = datetime.now()
+        n = _plugin_now()
         if mode == "day":   s = n.replace(hour=0, minute=0, second=0, microsecond=0)
         elif mode == "week": s = (n - timedelta(days=n.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
         elif mode == "month": s = n.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -1422,7 +1439,7 @@ class RepeatProMaxPlugin(Star):
         """hub 命令专用同步：刷新配置与独立每日账本。"""
         await self._sync_config()
         # 不依赖 _sync_config 的 debounce，且各玩法账本互不覆盖。
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = _today_key()
         if (self._hub_propose_count.get("_date", "") != today or
                 self._hub_draw_usage.get("_date", "") != today):
             async with self.lock:
@@ -1469,14 +1486,14 @@ class RepeatProMaxPlugin(Star):
     def _hub_today(self, gid: str) -> List[Dict[str, Any]]:
         """返回今日记录的副本（只读安全）"""
         rec = self._hub_records.get(gid, {})
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = _today_key()
         if rec.get("date") != today:
             return []
         return list(rec.get("records", []))
 
     def _hub_draw_used(self, gid: str, uid: str) -> int:
         """读取本群成员今日随机抽取用量；强娶和求婚永远不会进入此账本。"""
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = _today_key()
         if self._hub_draw_usage.get("_date") != today:
             return 0
         counts = self._hub_draw_usage.get(gid, {})
@@ -1489,7 +1506,7 @@ class RepeatProMaxPlugin(Star):
 
     def _hub_consume_draw(self, gid: str, uid: str) -> int:
         """随机抽取额度 +1 并返回最新用量；调用方必须在锁内。"""
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = _today_key()
         if self._hub_draw_usage.get("_date") != today:
             self._hub_draw_usage = {"_date": today}
         counts = self._hub_draw_usage.setdefault(gid, {})
@@ -1527,7 +1544,7 @@ class RepeatProMaxPlugin(Star):
 
     def _hub_init_today(self, gid: str) -> List[Dict[str, Any]]:
         """初始化今日记录并返回记录列表引用 — 调用方必须在锁内"""
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = _today_key()
         rec = self._hub_records.setdefault(gid, {"date": today, "records": []})
         if rec.get("date") != today:
             rec["date"] = today
@@ -2567,7 +2584,7 @@ class RepeatProMaxPlugin(Star):
         else:
             hub_section = "💕 抽老公/老婆功能未开启，请在管理面板中启用。\n"
         await event.send(event.plain_result(
-            f"\U0001F4DF RepeatProMax v2.1.6 指令帮助\n{'─'*30}\n"
+            f"\U0001F4DF RepeatProMax v2.1.7 指令帮助\n{'─'*30}\n"
             f"🔧 管理（仅群聊）\n"
             "  /复读开启          在本群开启复读\n"
             "  /复读关闭          在本群关闭复读\n"
@@ -2575,7 +2592,7 @@ class RepeatProMaxPlugin(Star):
             "  /复读统计          本群今日/本周/累计\n"
             f"{'─'*30}\n{hub_section}"
             f"{'─'*30}\n"
-            f"🔥 v2.1.6：头像发送失败时自动返回纯文字抽取结果\n"
+            f"🔥 v2.1.7：每日次数按北京时间零点可靠刷新\n"
             f"⚙️ 更多参数请在 WebUI 管理面板调整"))
 
     # ============================================================

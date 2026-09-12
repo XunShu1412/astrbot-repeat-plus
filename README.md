@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.1.6-blue?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-v2.1.7-blue?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.0.0-green?style=flat-square" alt="astrbot">
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/python-3.8+-purple?style=flat-square" alt="python">
@@ -237,6 +237,7 @@ playwright install chromium
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| **v2.1.7** | 2026-09-12 | 每日状态固定按北京时间零点刷新；修复无消息 ID 时连续多人指令可能被误去重，并增加跨零点混合模式测试 |
 | **v2.1.6** | 2026-09-12 | 抽取与强娶头像发送失败时自动降级为纯文字；若文字也发送失败则回滚记录和额度，避免 QQ `rich media transfer failed` 导致无响应或误扣次数 |
 | **v2.1.5** | 2026-09-12 | 玩法数据迁移至 AstrBot 标准持久化目录；修复复读冷却期间无前缀抽取指令无响应，并加入更新安全迁移与回归测试 |
 | **v2.1.4** | 2026-09-12 | 全面优化用户话术和后台说明；区分活跃池/全群池空提示，统一随机额度与求婚反馈，修复老婆模式“其他”误替换、最近结果取错及过期求婚长期占位 |
@@ -286,6 +287,12 @@ playwright install chromium
 - 关闭「极速模式」
 - 关闭「同用户连续刷」，只有不同人发相同内容才触发
 - 开启「权重衰减」，新消息权重更高
+</details>
+
+<details>
+<summary><b>Q: 每日次数什么时候刷新？</b></summary>
+
+每日随机抽取次数、每日强娶次数、求婚次数和今日关系记录统一以北京时间（UTC+8）零点为分界。插件不需要定时重启；零点后的第一条相关指令会自动完成跨日刷新。强娶冷却、求婚冷却、活跃成员池和抽取概率衰减按实际经过时长计算，不会在零点强制清空。
 </details>
 
 <details>

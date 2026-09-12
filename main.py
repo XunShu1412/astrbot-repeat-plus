@@ -1001,7 +1001,7 @@ class RepeatPlusPlugin(Star):
                 self._dbg(f"非 aiocqhttp 平台 ({platform})，无法获取群成员列表，回退活跃池")
         except Exception as e:
             self._log(logging.ERROR, f"获取群成员列表失败: {e}")
-        return pool
+        return [u for u in pool if u != uid and u not in excluded]
 
     async def _hub_resolve_pool(self, event: AstrMessageEvent, gid: str,
                                  uid: str, bid: str) -> List[str]:

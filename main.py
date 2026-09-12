@@ -247,6 +247,8 @@ class RepeatPlusPlugin(Star):
         self.trigger_times: Dict[str, List[float]] = {}
         self.lock = asyncio.Lock()
         self._hub_active_lock = asyncio.Lock()  # 独立锁，避免热路径与 _sync_config 竞争
+        # 记录已处理的消息，避免关键词路由与 @filter.command 双重执行
+        self._handled_command_events: Dict[Tuple[str, str, str], float] = {}
 
         # 策略实例
         self.strategies: Dict[str, InterruptStrategy] = {
@@ -291,7 +293,8 @@ class RepeatPlusPlugin(Star):
         self._hub_drawn_recent: Dict[str, Dict[str, float]] = {}  # 抽取概率衰减：{gid: {uid: 上次被抽时间戳}}
 
         # 求婚系统
-        self._proposals: Dict[str, Dict[str, Any]] = {}
+        # {群号: {被求婚者QQ: 求婚详情}}；每个目标只保留一条待处理请求
+        self._proposals: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._hub_propose_cd: Dict[str, float] = {}
         self._hub_propose_count: Dict[str, int] = {}
 
@@ -419,6 +422,41 @@ class RepeatPlusPlugin(Star):
     # ============================================================
     # 工具方法
     # ============================================================
+    def _command_once(self, event: AstrMessageEvent, key: str) -> bool:
+        """确保同一条消息只进入一次关键词/命令处理路径。"""
+        claims = getattr(event, "_repeat_plus_command_claims", None)
+        if claims is None:
+            claims = set()
+            try:
+                setattr(event, "_repeat_plus_command_claims", claims)
+            except Exception:
+                claims = None
+
+        message_obj = getattr(event, "message_obj", None)
+        gid = str(getattr(message_obj, "group_id", ""))
+        message_id = (
+            getattr(message_obj, "message_id", None)
+            or getattr(message_obj, "message_seq", None)
+            or getattr(message_obj, "id", None)
+            or id(event)
+        )
+        token = (gid, str(message_id), key)
+        now = time.monotonic()
+
+        # 备用表用于处理框架为同一消息创建多个事件对象的情况。
+        for old_token, old_ts in list(self._handled_command_events.items()):
+            if now - old_ts > 30:
+                self._handled_command_events.pop(old_token, None)
+        if token in self._handled_command_events:
+            return False
+        self._handled_command_events[token] = now
+
+        if claims is not None:
+            if key in claims:
+                return False
+            claims.add(key)
+        return True
+
     def _log(self, level: int, msg: str, exc_info: bool = False) -> None:
         logger.log(level, f"{LOG_PREFIX} {msg}", exc_info=exc_info)
 
@@ -780,6 +818,9 @@ class RepeatPlusPlugin(Star):
     async def on_on(self, e: AstrMessageEvent) -> None:
         g = self._gid(e)
         if not g: await e.send(e.plain_result("⚠️ 此指令仅支持在群聊中使用。")); return
+        if not await self._check_admin(e, g):
+            await e.send(e.plain_result("⛔ 仅群主/管理员可执行此操作。"))
+            return
         self.disabled_groups.discard(g)
         await e.send(e.plain_result("✅ 复读已开启 — 本群开始复读啦！"))
 
@@ -787,6 +828,9 @@ class RepeatPlusPlugin(Star):
     async def on_off(self, e: AstrMessageEvent) -> None:
         g = self._gid(e)
         if not g: await e.send(e.plain_result("⚠️ 此指令仅支持在群聊中使用。")); return
+        if not await self._check_admin(e, g):
+            await e.send(e.plain_result("⛔ 仅群主/管理员可执行此操作。"))
+            return
         self.disabled_groups.add(g)
         await e.send(e.plain_result("🚫 复读已关闭 — 本群不再触发复读。"))
 
@@ -885,7 +929,22 @@ class RepeatPlusPlugin(Star):
         excluded.update([uid, "0"])
         if not self._cfg.get("allow_marry_bot"):
             excluded.add(bid)
-        pool = [u for u in active if u not in excluded]
+
+        now = time.time()
+        active_days = int(self._cfg.get("hub_active_days", 30) or 0)
+        cutoff = now - active_days * 86400 if active_days > 0 else 0
+        pool = []
+        for member_id, info in active.items():
+            if member_id in excluded:
+                continue
+            ts = info.get("ts", 0) if isinstance(info, dict) else 0
+            # 全员池同步写入的 ts=0 不代表最近发言，不能进入活跃池。
+            if not isinstance(ts, (int, float)) or ts <= 0:
+                continue
+            if cutoff and ts < cutoff:
+                continue
+            pool.append(member_id)
+
         max_recs = self._cfg.get("max_records", MAX_RECORDS_DEFAULT)
         if max_recs > 0 and len(pool) > max_recs:
             pool = random.sample(pool, max_recs)
@@ -894,12 +953,12 @@ class RepeatPlusPlugin(Star):
     async def _hub_all_members(self, event: AstrMessageEvent, gid: str,
                                 uid: str, bid: str) -> List[str]:
         excluded = set(self._cfg["hub_excluded"])
-        excluded.update([uid, "0"])
+        excluded.update(["0"])
         if not self._cfg.get("allow_marry_bot"):
             excluded.add(bid)
         cached = self._hub_members_cache.get(gid)
         if cached and time.time() - cached[1] < 300:
-            return [u for u in cached[0] if u not in excluded]
+            return [u for u in cached[0] if u != uid and u not in excluded]
         pool: List[str] = []
         try:
             platform = event.get_platform_name()
@@ -936,6 +995,7 @@ class RepeatPlusPlugin(Star):
                         for muid, info in new_members.items():
                             if muid not in active:
                                 active[muid] = info
+                    # 缓存完整候选池，调用者自身在返回时再排除，避免首位调用者被缓存排除。
                     self._hub_members_cache[gid] = (pool, time.time())
             else:
                 self._dbg(f"非 aiocqhttp 平台 ({platform})，无法获取群成员列表，回退活跃池")
@@ -981,6 +1041,7 @@ class RepeatPlusPlugin(Star):
         return random.choices(pool, weights=weights, k=1)[0]
 
     async def _cmd_husband_draw(self, event: AstrMessageEvent, mode: str = "husband") -> None:
+        if not self._command_once(event, "draw"): return
         gid = await self._hub_guard(event, mode)
         if not gid: return
         uid = str(event.get_sender_id())
@@ -1086,6 +1147,7 @@ class RepeatPlusPlugin(Star):
         await self._cmd_husband_draw(event, mode="wife")
 
     async def _cmd_husband_my(self, event: AstrMessageEvent, mode: str = "husband") -> None:
+        if not self._command_once(event, "my"): return
         gid = await self._hub_guard(event, mode)
         if not gid: return
         uid = str(event.get_sender_id())
@@ -1119,6 +1181,7 @@ class RepeatPlusPlugin(Star):
         await self._cmd_husband_my(event, mode="wife")
 
     async def _cmd_husband_force(self, event: AstrMessageEvent, mode: str = "husband") -> None:
+        if not self._command_once(event, "force"): return
         gid = await self._hub_guard(event, mode)
         if not gid: return
         uid = str(event.get_sender_id())
@@ -1188,6 +1251,7 @@ class RepeatPlusPlugin(Star):
         await self._cmd_husband_force(event, mode="wife")
 
     async def _cmd_husband_rank(self, event: AstrMessageEvent, mode: str = "husband") -> None:
+        if not self._command_once(event, "rank"): return
         gid = await self._hub_guard(event, mode)
         if not gid: return
         rbq = self._hub_rbq.get(gid, {})
@@ -1217,6 +1281,7 @@ class RepeatPlusPlugin(Star):
         await self._cmd_husband_rank(event, mode="wife")
 
     async def _cmd_husband_help(self, event: AstrMessageEvent, mode: str = "husband") -> None:
+        if not self._command_once(event, "help"): return
         await self._hub_sync()
         hus, wife = self._hub_enabled()
         # 如果请求的模式关闭但另一个模式开启，fallback 到另一个模式
@@ -1263,6 +1328,7 @@ class RepeatPlusPlugin(Star):
         await self._cmd_husband_help(event, mode="wife")
 
     async def _cmd_husband_toggle_active(self, event: AstrMessageEvent) -> None:
+        if not self._command_once(event, "toggle_active"): return
         gid = self._gid(event)
         if not gid: await event.send(event.plain_result("⚠️ 此功能仅在群聊中可用。")); return
         await self._hub_sync()
@@ -1302,6 +1368,7 @@ class RepeatPlusPlugin(Star):
     # 关系图 (Vis.js HTML 渲染，基于 wifepicker 方案)
     # ============================================================
     async def _cmd_relation_graph(self, event: AstrMessageEvent) -> None:
+        if not self._command_once(event, "relation_graph"): return
         gid = self._gid(event)
         if not gid: await event.send(event.plain_result("⚠️ 此功能仅在群聊中可用。")); return
         await self._hub_sync()
@@ -1436,6 +1503,7 @@ class RepeatPlusPlugin(Star):
     # 求婚系统
     # ============================================================
     async def _cmd_propose(self, event: AstrMessageEvent) -> None:
+        if not self._command_once(event, "propose"): return
         gid = self._gid(event)
         if not gid: await event.send(event.plain_result("⚠️ 此功能仅在群聊中可用。")); return
         await self._hub_sync()
@@ -1474,7 +1542,10 @@ class RepeatPlusPlugin(Star):
         async with self.lock:
             # double-check：防止并发求婚超过每日限制 + CD 绕过
             lock_msg = None
-            if propose_cd > 0:
+            group_proposals = self._proposals.get(gid, {})
+            if target_id in group_proposals:
+                lock_msg = "💍 对方已有待处理的求婚请求，请稍后再试。"
+            if lock_msg is None and propose_cd > 0:
                 last_p2 = self._hub_propose_cd.get(uid, 0)
                 if now_ts - last_p2 < propose_cd:
                     lock_msg = f"⏰ 你的求婚冷却中，{int(propose_cd - (now_ts - last_p2))} 秒后可再次发起求婚。"
@@ -1486,7 +1557,7 @@ class RepeatPlusPlugin(Star):
                 if propose_cd > 0:
                     self._hub_propose_cd[uid] = now_ts
                 self._hub_propose_count[uid] = self._hub_propose_count.get(uid, 0) + 1
-                self._proposals[gid] = {
+                self._proposals.setdefault(gid, {})[target_id] = {
                     "from": uid, "from_name": user_name,
                     "to": target_id, "to_name": target_name,
                     "ts": now_ts,
@@ -1503,6 +1574,7 @@ class RepeatPlusPlugin(Star):
 
     @filter.command("接受求婚")
     async def on_accept_proposal(self, e: AstrMessageEvent) -> None:
+        if not self._command_once(e, "accept_proposal"): return
         gid = self._gid(e)
         if not gid: await e.send(e.plain_result("⚠️ 此功能仅在群聊中可用。")); return
         await self._hub_sync()
@@ -1513,33 +1585,46 @@ class RepeatPlusPlugin(Star):
         uid = str(e.get_sender_id())
 
         # 在锁内读取 proposal 并做原子操作，防止并发覆盖
+        no_proposal = False
+        expired = False
         async with self.lock:
-            proposal = self._proposals.get(gid)
-            if not proposal or proposal["to"] != uid:
-                await e.send(e.plain_result("💍 你当前没有待处理的求婚请求。"))
-                return
-            if time.time() - proposal["ts"] > 300:
+            group_proposals = self._proposals.get(gid, {})
+            proposal = group_proposals.get(uid)
+            if not proposal:
+                no_proposal = True
+            elif time.time() - proposal["ts"] > 300:
                 from_uid = proposal["from"]
                 self._hub_propose_count[from_uid] = max(0, self._hub_propose_count.get(from_uid, 1) - 1)
                 self._hub_propose_cd.pop(from_uid, None)
-                self._proposals.pop(gid, None)
-                await e.send(e.plain_result("⏰ 求婚请求已过期（5分钟），请重新发起。\n💡 求婚次数已返还~"))
-                return
+                group_proposals.pop(uid, None)
+                if not group_proposals:
+                    self._proposals.pop(gid, None)
+                self._data_dirty = True
+                expired = True
+            else:
+                propose_mode = "wife" if wife else "husband"
+                label = self._hb_label(propose_mode)
+                now = time.time()
+                self._hub_init_today(gid).append({
+                    "user_id": proposal["from"], "user_name": proposal["from_name"],
+                    "husband_id": proposal["to"], "husband_name": proposal["to_name"],
+                    "ts": now, "source": "propose",
+                })
+                self._hub_rbq_incr(gid, proposal["to"])
+                group_proposals.pop(uid, None)
+                if not group_proposals:
+                    self._proposals.pop(gid, None)
+                self._data_dirty = True
+                # 保存 proposal 数据供锁外发送消息使用
+                from_name = proposal["from_name"]
+                to_name = proposal["to_name"]
 
-            propose_mode = "wife" if wife else "husband"
-            label = self._hb_label(propose_mode)
-            now = time.time()
-            self._hub_init_today(gid).append({
-                "user_id": proposal["from"], "user_name": proposal["from_name"],
-                "husband_id": proposal["to"], "husband_name": proposal["to_name"],
-                "ts": now, "source": "propose",
-            })
-            self._hub_rbq_incr(gid, proposal["to"])
-            self._proposals.pop(gid, None)
-            self._data_dirty = True
-            # 保存 proposal 数据供锁外发送消息使用
-            from_name = proposal["from_name"]
-            to_name = proposal["to_name"]
+        if no_proposal:
+            await e.send(e.plain_result("💍 你当前没有待处理的求婚请求。"))
+            return
+        if expired:
+            await e.send(e.plain_result("⏰ 求婚请求已过期（5分钟），请重新发起。\n💡 求婚次数已返还~"))
+            return
 
         await e.send(e.plain_result(
             f"💒 恭喜！{from_name} 和 {to_name} 喜结连理！\n"
@@ -1550,22 +1635,31 @@ class RepeatPlusPlugin(Star):
 
     @filter.command("拒绝求婚")
     async def on_reject_proposal(self, e: AstrMessageEvent) -> None:
+        if not self._command_once(e, "reject_proposal"): return
         gid = self._gid(e)
         if not gid: await e.send(e.plain_result("⚠️ 此功能仅在群聊中可用。")); return
         uid = str(e.get_sender_id())
 
+        no_proposal = False
         async with self.lock:
-            proposal = self._proposals.get(gid)
-            if not proposal or proposal["to"] != uid:
-                await e.send(e.plain_result("💍 你当前没有待处理的求婚请求。"))
-                return
-            # 返还求婚次数和冷却
-            from_uid = proposal["from"]
-            self._hub_propose_count[from_uid] = max(0, self._hub_propose_count.get(from_uid, 1) - 1)
-            self._hub_propose_cd.pop(from_uid, None)
-            self._proposals.pop(gid, None)
-            self._data_dirty = True
-            from_name = proposal["from_name"]
+            group_proposals = self._proposals.get(gid, {})
+            proposal = group_proposals.get(uid)
+            if not proposal:
+                no_proposal = True
+            else:
+                # 返还求婚次数和冷却
+                from_uid = proposal["from"]
+                self._hub_propose_count[from_uid] = max(0, self._hub_propose_count.get(from_uid, 1) - 1)
+                self._hub_propose_cd.pop(from_uid, None)
+                group_proposals.pop(uid, None)
+                if not group_proposals:
+                    self._proposals.pop(gid, None)
+                self._data_dirty = True
+                from_name = proposal["from_name"]
+
+        if no_proposal:
+            await e.send(e.plain_result("💍 你当前没有待处理的求婚请求。"))
+            return
 
         await e.send(e.plain_result(f"💔 {from_name} 的求婚被拒绝了...\n💡 求婚次数已返还，可以重新求婚~"))
 
@@ -1576,6 +1670,7 @@ class RepeatPlusPlugin(Star):
     # 管理员重置命令
     # ============================================================
     async def _cmd_reset_records(self, event: AstrMessageEvent) -> None:
+        if not self._command_once(event, "reset_records"): return
         gid = self._gid(event)
         if not gid: await event.send(event.plain_result("⚠️ 此功能仅在群聊中可用。")); return
         if not await self._check_admin(event, gid):
@@ -1592,6 +1687,7 @@ class RepeatPlusPlugin(Star):
         await event.send(event.plain_result("✅ 本群抽取记录和排行榜已重置！"))
 
     async def _cmd_reset_force_cd(self, event: AstrMessageEvent) -> None:
+        if not self._command_once(event, "reset_force_cd"): return
         uid = str(event.get_sender_id())
         chain = getattr(event.message_obj, 'message', [])
 

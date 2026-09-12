@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AstrBot 复读增强插件 ProMax v2.1.1 — 强娶校验、文案扩充与稳定性优化"""
+"""AstrBot 复读增强插件 ProMax v2.1.2 — 表情复读与触发链路修复"""
 
-import random, logging, time, re, copy, asyncio, json, os
+import random, logging, time, re, copy, asyncio, json, os, hashlib
 from typing import Dict, List, Set, Optional, Tuple, Any
 from collections import deque
 from difflib import SequenceMatcher
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
@@ -22,6 +23,7 @@ DEFAULT_COOLDOWN = 10
 CLEANUP_INTERVAL = 3600
 CONFIG_SYNC_INTERVAL = 60
 DEFAULT_HUMAN_DELAY = "0.5-2.0"
+DEFAULT_CONTENT_BLACKLIST = "admin|【|抽老婆|抽老公"
 RANK_RETENTION_DAYS = 30
 MAX_LENGTH_DEVIATION = 0.3
 INTERRUPT_SCALE_FACTOR = 0.1
@@ -32,12 +34,17 @@ FAST_TRIGGER_DECAY_SECONDS = 300
 INTERRUPT_COOLDOWN_MULTIPLIER = 2.0
 DUPLICATE_SUPPRESSION_SECONDS = 60
 SIM_CACHE_MAX = 3000
+VOLATILE_MEDIA_QUERY_KEYS = frozenset({
+    "rkey", "token", "access_token", "auth", "authkey", "sign", "signature",
+    "expires", "expire", "expiration", "timestamp", "ts", "time", "t",
+})
+MEDIA_DIGEST_RE = re.compile(r"(?i)(?<![0-9a-f])([0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})(?![0-9a-f])")
 
 # 抽老公/老婆系统
 HUSBAND_ACTIVE_DAYS = 30
 HUSBAND_CLEANUP_INTERVAL = 86400
 HUSBAND_FORCE_CD_DAYS = 3
-HUSBAND_DAILY_LIMIT = 1
+HUSBAND_DAILY_LIMIT = 10
 MAX_RECORDS_DEFAULT = 500
 
 # 数据持久化目录
@@ -178,13 +185,13 @@ _HUB_MY_HEADER = [
     "📜 今日夫君名册：", "💝 今天建立的关系：", "🗂️ 本日羁绊档案：", "🌟 今日配对结果：",
 ]
 _HUB_RANK_TITLE = [
-    "🏆 群内最受欢迎老公榜", "🏆 强娶人气榜", "🏆 群内老公热度榜",
+    "🏆 群内最受欢迎老公榜", "🏆 随机抽取人气榜", "🏆 群内老公热度榜",
     "🏆 被选择次数天梯榜", "🏆 今日羁绊人气榜", "🏆 群友魅力排行榜",
 ]
 _HUB_RANK_EMPTY = [
-    "本群暂无强娶记录，快来 /强娶老公 建立第一条羁绊！",
-    "还没有人登上榜单，第一名正在等待出现。",
-    "📭 排行榜暂时为空，使用 /强娶老公 后会自动统计。",
+    "本群今日暂无随机抽取记录，快来抽取第一位群友吧！",
+    "今天还没有人登上随机抽取榜单，第一位幸运儿会是谁？",
+    "📭 排行榜暂时为空，随机抽取成功后会自动统计。",
     "🏜️ 榜单还是一片空白，开局就靠你了。",
     "🌱 人气榜正在萌芽，第一条记录会是谁呢？",
     "🎯 暂无数据，先选择一位本群成员试试吧。",
@@ -378,17 +385,17 @@ class RepeatProMaxPlugin(Star):
         self._cfg: Dict[str, Any] = {
             "threshold": 3, "window_size": 5, "fuzzy_threshold": 0.9,
             "enable_weight_decay": False, "allow_same_user": True,
-            "min_len": 1, "max_len": 200,
+            "min_len": 0, "max_len": 200,
             "cooldown": 10, "cd_escalation": True,
             "dup_suppress": 60, "intr_prob": 0.1, "intr_cd_mul": 2.0,
             "intr_shuffle": True, "intr_reverse": True,
-            "intr_custom": True, "intr_silent": False,
-            "human_delay": "0.5-2.0", "fast_mode": False,
+            "intr_custom": False, "intr_silent": False,
+            "human_delay": "0.5-2.0", "fast_mode": True,
             "blacklist_re": None, "ignored_groups": set(), "ignored_users": set(),
             "debug": False,
-            "hub_daily": 1, "hub_force_cd": 3, "hub_force_daily": 1,
+            "hub_daily": 10, "hub_force_cd": 3, "hub_force_daily": 3,
             "hub_propose_daily": 3, "hub_propose_cd": 86400, "hub_active_days": 30,
-            "hub_excluded": set(), "hub_keyword": False, "hub_require_active": True,
+            "hub_excluded": set(), "hub_keyword": True, "hub_require_active": False,
             "hub_draw_decay_days": 7, "hub_iterations": 100,
             "enable_husband": True, "enable_wife": True,
             "at_waifu": False, "auto_set_other_half": False,
@@ -404,8 +411,11 @@ class RepeatProMaxPlugin(Star):
         # 抽老公/老婆系统
         self._hub_active: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._hub_records: Dict[str, Dict[str, Any]] = {}
+        # 每日随机抽取额度使用量独立于关系记录，避免强娶/求婚写入时影响次数。
+        self._hub_draw_usage: Dict[str, Any] = {
+            "_date": datetime.now().strftime("%Y-%m-%d")
+        }
         self._hub_force_cd: Dict[str, float] = {}
-        self._hub_rbq: Dict[str, Dict[str, int]] = {}
         self._hub_last_cleanup = 0.0
         self._hub_members_cache: Dict[str, Tuple[List[str], float]] = {}
         self._hub_drawn_recent: Dict[str, Dict[str, float]] = {}  # 抽取概率衰减：{gid: {uid: 上次被抽时间戳}}
@@ -425,7 +435,7 @@ class RepeatProMaxPlugin(Star):
         # 关键词路由表
         self._build_hub_keywords()
 
-        self._log(logging.INFO, "插件已加载 ProMax v2.1.1")
+        self._log(logging.INFO, "插件已加载 ProMax v2.1.2")
 
     # ============================================================
     # 数据持久化
@@ -464,12 +474,43 @@ class RepeatProMaxPlugin(Star):
         fc = self._load_json("forced_marriage.json", {})
         if isinstance(fc, dict):
             self._hub_force_cd = {k: float(v) for k, v in fc.items()}
-        rbq = self._load_json("rbq_stats.json", {})
-        if isinstance(rbq, dict):
-            self._hub_rbq = {k: {kk: int(vv) for kk, vv in v.items()} for k, v in rbq.items()}
         recs = self._load_json("wife_records.json", {})
         if isinstance(recs, dict):
             self._hub_records = recs
+        today = datetime.now().strftime("%Y-%m-%d")
+        usage = self._load_json("draw_usage.json", None)
+        safe_usage: Dict[str, Any] = {"_date": today}
+        if isinstance(usage, dict) and usage.get("_date") == today:
+            for gid, counts in usage.items():
+                if gid == "_date" or not isinstance(counts, dict):
+                    continue
+                safe_counts: Dict[str, int] = {}
+                for uid, count in counts.items():
+                    try:
+                        parsed = max(0, int(count))
+                    except (TypeError, ValueError):
+                        continue
+                    if parsed:
+                        safe_counts[str(uid)] = parsed
+                if safe_counts:
+                    safe_usage[str(gid)] = safe_counts
+        elif usage is None:
+            # 首次升级时从当天旧记录迁移一次；之后额度只读独立账本。
+            for gid, rec in self._hub_records.items():
+                if not isinstance(rec, dict) or rec.get("date") != today:
+                    continue
+                counts: Dict[str, int] = {}
+                for item in rec.get("records", []):
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("source", "draw") not in ("draw", "mutual"):
+                        continue
+                    uid = str(item.get("user_id", ""))
+                    if uid:
+                        counts[uid] = counts.get(uid, 0) + 1
+                if counts:
+                    safe_usage[str(gid)] = counts
+        self._hub_draw_usage = safe_usage
         pc = self._load_json("propose_cd.json", {})
         if isinstance(pc, dict):
             self._hub_propose_cd = {k: float(v) for k, v in pc.items()}
@@ -485,16 +526,27 @@ class RepeatProMaxPlugin(Star):
                     except (ValueError, TypeError):
                         safe_pn[k] = 0
             self._hub_propose_count = safe_pn
+        pending = self._load_json("proposals.json", {})
+        if isinstance(pending, dict):
+            self._proposals = pending
         self._dbg("持久化数据已加载")
 
     def _save_persisted_data(self) -> None:
         """保存数据到 JSON 文件"""
         self._save_json("active_users.json", self._hub_active)
         self._save_json("forced_marriage.json", self._hub_force_cd)
-        self._save_json("rbq_stats.json", self._hub_rbq)
         self._save_json("wife_records.json", self._hub_records)
+        self._save_json("draw_usage.json", self._hub_draw_usage)
         self._save_json("propose_cd.json", self._hub_propose_cd)
         self._save_json("propose_count.json", self._hub_propose_count)
+        self._save_json("proposals.json", self._proposals)
+
+    def _flush_persisted_data(self) -> None:
+        """关键玩法状态成功变更后立即落盘，避免插件热重载造成次数回退。"""
+        if not self._data_dirty:
+            return
+        self._save_persisted_data()
+        self._data_dirty = False
 
     # ============================================================
     # 关键词路由表构建
@@ -585,6 +637,27 @@ class RepeatProMaxPlugin(Star):
     def _parse_set(self, key: str) -> Set[str]:
         raw = self.config.get(key, "")
         return {s.strip() for s in str(raw).replace('\n', ',').split(',') if s.strip()} if raw else set()
+
+    @staticmethod
+    def _bounded_int(value: Any, default: int, minimum: int, maximum: Optional[int] = None) -> int:
+        """容错读取整数配置，避免旧配置或手工编辑导致复读流水线异常。"""
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        parsed = max(minimum, parsed)
+        return min(parsed, maximum) if maximum is not None else parsed
+
+    @staticmethod
+    def _bounded_float(value: Any, default: float, minimum: float,
+                       maximum: Optional[float] = None) -> float:
+        """容错读取浮点配置，并限制到后台声明的有效范围。"""
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = default
+        parsed = max(minimum, parsed)
+        return min(parsed, maximum) if maximum is not None else parsed
 
     def _gid(self, event: AstrMessageEvent) -> Optional[str]:
         mo = getattr(event, 'message_obj', None)
@@ -681,39 +754,54 @@ class RepeatProMaxPlugin(Star):
 
             old_husband = self._cfg.get("enable_husband", True)
             old_wife = self._cfg.get("enable_wife", True)
+            window_size = self._bounded_int(
+                self.config.get("window_size", 5), 5, 1, MAX_WINDOW_SIZE)
+            raw_threshold = self._bounded_int(
+                self.config.get("threshold", 3), 3, 1, MAX_WINDOW_SIZE)
+            threshold = min(raw_threshold, window_size)
             # 聚合所有配置到 _cfg 缓存
             self._cfg = {
-                "threshold": self.config.get("threshold", 3),
-                "window_size": min(self.config.get("window_size", 5), MAX_WINDOW_SIZE),
-                "fuzzy_threshold": self.config.get("fuzzy_threshold", 0.9),
+                "threshold": threshold,
+                "window_size": window_size,
+                "fuzzy_threshold": self._bounded_float(
+                    self.config.get("fuzzy_threshold", 0.9), 0.9, 0.0, 1.0),
                 "enable_weight_decay": self.config.get("enable_weight_decay", False),
                 "allow_same_user": self.config.get("allow_same_user", True),
-                "min_len": self.config.get("min_message_length", 1),
-                "max_len": self.config.get("max_message_length", 200),
-                "cooldown": self.config.get("cooldown_time", DEFAULT_COOLDOWN),
+                "min_len": self._bounded_int(
+                    self.config.get("min_message_length", 0), 0, 0),
+                "max_len": self._bounded_int(
+                    self.config.get("max_message_length", 200), 200, 0),
+                "cooldown": self._bounded_float(
+                    self.config.get("cooldown_time", DEFAULT_COOLDOWN),
+                    DEFAULT_COOLDOWN, 0.0),
                 "cd_escalation": self.config.get("cooldown_escalation", True),
-                "dup_suppress": self.config.get("duplicate_suppression_seconds", DUPLICATE_SUPPRESSION_SECONDS),
-                "intr_prob": self.config.get("interrupt_probability", 0.1),
-                "intr_cd_mul": self.config.get("interrupt_cooldown_multiplier", INTERRUPT_COOLDOWN_MULTIPLIER),
+                "dup_suppress": self._bounded_float(
+                    self.config.get("duplicate_suppression_seconds", DUPLICATE_SUPPRESSION_SECONDS),
+                    DUPLICATE_SUPPRESSION_SECONDS, 0.0),
+                "intr_prob": self._bounded_float(
+                    self.config.get("interrupt_probability", 0.1), 0.1, 0.0, 1.0),
+                "intr_cd_mul": self._bounded_float(
+                    self.config.get("interrupt_cooldown_multiplier", INTERRUPT_COOLDOWN_MULTIPLIER),
+                    INTERRUPT_COOLDOWN_MULTIPLIER, 0.0),
                 "intr_shuffle": self.config.get("interrupt_shuffle", True),
                 "intr_reverse": self.config.get("interrupt_reverse", True),
-                "intr_custom": self.config.get("interrupt_custom", True),
+                "intr_custom": self.config.get("interrupt_custom", False),
                 "intr_silent": self.config.get("interrupt_silent", False),
                 "human_delay": self.config.get("human_delay", DEFAULT_HUMAN_DELAY),
-                "fast_mode": self.config.get("fast_mode", False),
+                "fast_mode": self.config.get("fast_mode", True),
                 "blacklist_re": self._compile_blacklist(),
                 "ignored_groups": self._parse_set("ignored_groups"),
                 "ignored_users": self._parse_set("ignored_users"),
                 "debug": self.config.get("debug_mode", False),
                 "hub_daily": self.config.get("husband_daily_limit", HUSBAND_DAILY_LIMIT),
                 "hub_force_cd": self.config.get("husband_force_cd_days", HUSBAND_FORCE_CD_DAYS),
-                "hub_force_daily": self.config.get("husband_force_daily", 1),
+                "hub_force_daily": self.config.get("husband_force_daily", 3),
                 "hub_propose_daily": self.config.get("husband_propose_daily", 3),
                 "hub_propose_cd": self.config.get("husband_propose_cd", 86400),
                 "hub_active_days": self.config.get("husband_active_days", HUSBAND_ACTIVE_DAYS),
                 "hub_excluded": self._parse_set("husband_excluded_users"),
-                "hub_keyword": self.config.get("husband_keyword_trigger", False),
-                "hub_require_active": self.config.get("husband_require_active", True),
+                "hub_keyword": self.config.get("husband_keyword_trigger", True),
+                "hub_require_active": self.config.get("husband_require_active", False),
                 "hub_draw_decay_days": self.config.get("husband_draw_decay_days", 7),
                 "hub_iterations": self.config.get("relation_graph_iterations", 100),
                 "enable_husband": self.config.get("enable_husband", True),
@@ -728,6 +816,10 @@ class RepeatProMaxPlugin(Star):
                 "whitelist_groups": self._parse_set("whitelist_groups"),
                 "blacklist_groups": self._parse_set("blacklist_groups"),
             }
+
+            if raw_threshold > window_size:
+                self._dbg(
+                    f"触发数 {raw_threshold} 大于窗口 {window_size}，已自动按 {window_size} 条生效")
 
             # 模式切换时重建关键词路由表
             new_husband = self._cfg.get("enable_husband", True)
@@ -819,6 +911,8 @@ class RepeatProMaxPlugin(Star):
             today = datetime.now().strftime("%Y-%m-%d")
             if self._hub_propose_count.get("_date", "") != today:
                 self._hub_propose_count = {"_date": today}
+            if self._hub_draw_usage.get("_date", "") != today:
+                self._hub_draw_usage = {"_date": today}
             # 清理过期求婚 CD
             stale_pc = [u for u, t in self._hub_propose_cd.items()
                         if now - t > max(self._cfg["hub_propose_cd"] * 5, 86400)]
@@ -836,7 +930,7 @@ class RepeatProMaxPlugin(Star):
             self._data_dirty = False
 
     def _compile_blacklist(self):
-        bl = self.config.get("content_blacklist", "")
+        bl = self.config.get("content_blacklist", DEFAULT_CONTENT_BLACKLIST)
         if not bl:
             return None
         try:
@@ -848,6 +942,143 @@ class RepeatProMaxPlugin(Star):
     # ============================================================
     # 签名与相似度
     # ============================================================
+    @staticmethod
+    def _component_value(component: Any, *names: str) -> Any:
+        for name in names:
+            if isinstance(component, dict) and name in component:
+                value = component.get(name)
+            else:
+                try:
+                    value = getattr(component, name, None)
+                except Exception:
+                    value = None
+            if value is not None and value != "":
+                return value
+        return None
+
+    @staticmethod
+    def _canonical_media_ref(value: Any) -> str:
+        """去掉临时鉴权参数，尽量提取跨消息稳定的媒体标识。"""
+        if value is None or value == "":
+            return ""
+        if isinstance(value, (bytes, bytearray)):
+            return "H:" + hashlib.sha256(bytes(value)).hexdigest()
+        raw = str(value).strip()
+        if not raw:
+            return ""
+        if raw.startswith("base64://"):
+            return "H:" + hashlib.sha256(raw[9:].encode("utf-8")).hexdigest()
+
+        if raw.startswith(("http://", "https://")):
+            try:
+                parsed = urlsplit(raw)
+                path_digest = MEDIA_DIGEST_RE.search(parsed.path)
+                if path_digest:
+                    return "H:" + path_digest.group(1).lower()
+                stable_query = [
+                    (key, val) for key, val in parse_qsl(parsed.query, keep_blank_values=True)
+                    if key.lower() not in VOLATILE_MEDIA_QUERY_KEYS
+                ]
+                stable_query.sort(key=lambda item: (item[0].lower(), item[1]))
+                clean = urlunsplit((
+                    parsed.scheme.lower(), parsed.netloc.lower(), parsed.path,
+                    urlencode(stable_query, doseq=True), "",
+                ))
+                return "U:" + clean
+            except Exception:
+                return "U:" + raw.split("#", 1)[0]
+
+        digest = MEDIA_DIGEST_RE.search(raw)
+        if digest:
+            return "H:" + digest.group(1).lower()
+        normalized = raw.replace("\\", "/").split("?", 1)[0].split("#", 1)[0]
+        return "P:" + normalized.rsplit("/", 1)[-1].lower()
+
+    @classmethod
+    def _image_identity(cls, component: Any) -> str:
+        """优先使用表情 ID/内容摘要，避免 QQ 临时 URL 每次变化。"""
+        emoji_id = cls._component_value(
+            component, "emoji_id", "emojiId", "sticker_id", "stickerId")
+        if emoji_id is not None:
+            package_id = cls._component_value(
+                component, "emoji_package_id", "emojiPackageId", "pack_id", "packId") or "0"
+            return f"E:{package_id}:{emoji_id}"
+
+        for name in ("md5", "file_md5", "fileMd5", "sha256", "checksum"):
+            value = cls._component_value(component, name)
+            if value is not None:
+                return "H:" + str(value).lower()
+
+        # file 通常是 QQ 内容文件名；URL 作为回退并移除会变化的鉴权参数。
+        for name in ("file", "path", "url", "file_id", "fileId"):
+            identity = cls._canonical_media_ref(cls._component_value(component, name))
+            if identity:
+                return identity
+        return ""
+
+    @classmethod
+    def _raw_segments(cls, raw_message: Any) -> List[Any]:
+        """从 aiocqhttp/OneBot 原始事件中读取被 AstrBot 忽略的消息段。"""
+        if raw_message is None:
+            return []
+        payload = None
+        if isinstance(raw_message, dict):
+            payload = raw_message.get("message")
+        else:
+            try:
+                getter = getattr(raw_message, "get", None)
+                if callable(getter):
+                    payload = getter("message")
+            except Exception:
+                payload = None
+            if payload is None:
+                payload = getattr(raw_message, "message", None)
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return []
+        if isinstance(payload, dict):
+            return [payload]
+        return list(payload) if isinstance(payload, (list, tuple)) else []
+
+    @classmethod
+    def _augment_repeat_chain(cls, chain: List[Any], raw_message: Any) -> List[Any]:
+        """补回 AstrBot aiocqhttp 目前会丢弃的 mface 商城表情段。"""
+        result = list(chain or [])
+        existing = {
+            cls._image_identity(component)
+            for component in result if isinstance(component, Image)
+        }
+        for segment in cls._raw_segments(raw_message):
+            seg_type = str(cls._component_value(segment, "type") or "").lower()
+            if seg_type not in {"mface", "market_face", "marketface"}:
+                continue
+            data = cls._component_value(segment, "data")
+            data = data if isinstance(data, dict) else segment
+            emoji_id = cls._component_value(data, "emoji_id", "emojiId")
+            if not emoji_id:
+                continue
+            package_id = cls._component_value(
+                data, "emoji_package_id", "emojiPackageId") or "0"
+            identity = f"E:{package_id}:{emoji_id}"
+            if identity in existing:
+                continue
+            directory = str(emoji_id)[:2]
+            url = (
+                "https://gxh.vip.qq.com/club/item/parcel/item/"
+                f"{directory}/{emoji_id}/raw300.gif"
+            )
+            result.append(Image.fromURL(
+                url,
+                emoji_id=str(emoji_id),
+                emoji_package_id=str(package_id),
+                key=cls._component_value(data, "key") or "",
+                summary=cls._component_value(data, "summary") or "[商城表情]",
+            ))
+            existing.add(identity)
+        return result
+
     def _sig(self, chain: List[Any]) -> Tuple[str, str]:
         if not chain: return "", ""
         parts: List[str] = []
@@ -857,13 +1088,11 @@ class RepeatProMaxPlugin(Star):
                 t = getattr(c, 'text', '').strip()
                 if t: parts.append(f"T:{t}"); text += t
             elif isinstance(c, Image):
-                v = getattr(c, 'md5', None) or getattr(c, 'file_id', None) or \
-                    getattr(c, 'file', None) or getattr(c, 'path', None) or \
-                    getattr(c, 'url', None) or "unknown"
-                parts.append(f"I:{str(v).split('?')[0]}")
+                identity = self._image_identity(c)
+                if identity: parts.append(f"I:{identity}")
             elif isinstance(c, Face):
-                v = getattr(c, 'id', None) or getattr(c, 'face_id', None) or getattr(c, 'number', None) or "0"
-                parts.append(f"F:{v}")
+                v = self._component_value(c, "id", "face_id", "number")
+                if v is not None: parts.append(f"F:{v}")
         return "|".join(parts), text
 
     @staticmethod
@@ -908,16 +1137,28 @@ class RepeatProMaxPlugin(Star):
                     senders.add(h[1])
                     if i == len(hist) - 1: lm = True
             return float(len(senders)), lm
-        tw, seen = 0.0, set()
+
+        # 线性衰减权重的平均值保持为 1；同时用实际匹配数封顶，
+        # 保证“阈值 3”至少需要 3 条（或 3 位）匹配消息。
+        weighted_score = 0.0
         n = len(hist)
+        scale = 2.0 / (n + 1)
+        sender_weights: Dict[str, float] = {}
+        match_count = 0
         for i, h in enumerate(hist):
             if self._similar(sig, txt, h[0], h[2]):
+                weight = (i + 1) * scale
                 if cfg["allow_same_user"]:
-                    tw += (i + 1) / n
-                elif h[1] not in seen:
-                    seen.add(h[1]); tw += (i + 1) / n
+                    match_count += 1
+                    weighted_score += weight
+                else:
+                    # 同一发送者出现多次时保留最新（最高）的权重。
+                    sender_weights[h[1]] = max(sender_weights.get(h[1], 0.0), weight)
                 if i == len(hist) - 1: lm = True
-        return tw, lm
+        if not cfg["allow_same_user"]:
+            match_count = len(sender_weights)
+            weighted_score = sum(sender_weights.values())
+        return min(float(match_count), weighted_score), lm
 
     # ============================================================
     # 长度过滤
@@ -927,7 +1168,7 @@ class RepeatProMaxPlugin(Star):
         cfg = self._cfg
         if len(txt) < cfg["min_len"]:
             self._dbg(f"过短: '{txt}' ({len(txt)}<{cfg['min_len']})"); return False
-        if len(txt) > cfg["max_len"]:
+        if cfg["max_len"] > 0 and len(txt) > cfg["max_len"]:
             self._dbg(f"过长: ({len(txt)}>{cfg['max_len']})"); return False
         return True
 
@@ -991,6 +1232,12 @@ class RepeatProMaxPlugin(Star):
     async def on_status(self, e: AstrMessageEvent) -> None:
         g = self._gid(e)
         if not g: await e.send(e.plain_result("⚠️ 此指令仅支持在群聊中使用。")); return
+        await self._sync_config()
+        if g in self._cfg.get("ignored_groups", set()):
+            await e.send(e.plain_result(
+                "🚫 复读状态：后台配置已排除此群\n"
+                "💡 请从「不启用复读的群号」中移除本群群号。"))
+            return
         if g in self.disabled_groups:
             await e.send(e.plain_result("🚫 复读状态：已关闭"))
             return
@@ -1001,9 +1248,20 @@ class RepeatProMaxPlugin(Star):
         filled = min(bar_len, max(0, int((elapsed / cd) * bar_len) if cd > 0 else bar_len))
         bar = "█" * filled + "░" * (bar_len - filled)
         today = len([t for t in self.trigger_times.get(g, []) if t >= self._ts_min("day")])
+        threshold = self._cfg["threshold"]
+        window_size = self._cfg["window_size"]
+        same_user = "允许同一人连发" if self._cfg["allow_same_user"] else "需要不同成员参与"
+        progress = 0.0
+        hist = self.group_history.get(g)
+        if hist:
+            latest_sig, _, latest_txt, _ = hist[-1]
+            progress, _ = self._weighted(hist, latest_sig, latest_txt)
         await e.send(e.plain_result(
             f"✅ 复读状态：已开启\n"
             f"⏱️ 冷却进度：{bar} {remain:.0f}s/{cd:.0f}s\n"
+            f"🎯 触发条件：{threshold} 条 / 最近 {window_size} 条\n"
+            f"👥 计数方式：{same_user}\n"
+            f"🧩 当前候选进度：{progress:.1f}/{threshold}\n"
             f"\U0001F4CA 今日触发：{today} 次"))
 
     @filter.command("复读统计")
@@ -1022,14 +1280,35 @@ class RepeatProMaxPlugin(Star):
     # 抽老公/老婆系统
     # ============================================================
     async def _hub_sync(self) -> None:
-        """hub 命令专用同步：刷新配置 + 每日重置（独立于 _sync_config 的 debounce）"""
+        """hub 命令专用同步：刷新配置与独立每日账本。"""
         await self._sync_config()
-        # 每日重置求婚次数 — 不依赖 _sync_config 的 debounce
+        # 不依赖 _sync_config 的 debounce，且各玩法账本互不覆盖。
         today = datetime.now().strftime("%Y-%m-%d")
-        if self._hub_propose_count.get("_date", "") != today:
+        if (self._hub_propose_count.get("_date", "") != today or
+                self._hub_draw_usage.get("_date", "") != today):
             async with self.lock:
                 if self._hub_propose_count.get("_date", "") != today:
                     self._hub_propose_count = {"_date": today}
+                    self._data_dirty = True
+                if self._hub_draw_usage.get("_date", "") != today:
+                    self._hub_draw_usage = {"_date": today}
+                    self._data_dirty = True
+
+    async def _check_hub_group_scope(self, event: AstrMessageEvent, gid: str) -> bool:
+        """应用关系玩法群范围；该范围不能影响独立的复读功能。"""
+        whitelist = self._cfg.get("whitelist_groups", set())
+        blacklist = self._cfg.get("blacklist_groups", set())
+        if whitelist:
+            if gid in whitelist:
+                return True
+            await event.send(event.plain_result(
+                "🚫 当前群不在关系玩法白名单中，无法使用抽取、强娶、求婚或关系图。"))
+            return False
+        if gid in blacklist:
+            await event.send(event.plain_result(
+                "🚫 当前群已被加入关系玩法黑名单，无法使用抽取、强娶、求婚或关系图。"))
+            return False
+        return True
 
     async def _hub_guard(self, event: AstrMessageEvent, mode: str = "husband") -> Optional[str]:
         """公共守卫：gid 检查 + 配置同步 + 模式开关检查，返回 gid 或 None（已发送错误消息）"""
@@ -1038,6 +1317,8 @@ class RepeatProMaxPlugin(Star):
             await event.send(event.plain_result("⚠️ 此功能仅在群聊中可用。"))
             return None
         await self._hub_sync()
+        if not await self._check_hub_group_scope(event, gid):
+            return None
         if mode == "husband" and not self._cfg.get("enable_husband", True):
             await event.send(event.plain_result("❌ 老公模式未开启，请在管理面板中启用「开启老公模式」。"))
             return None
@@ -1053,6 +1334,33 @@ class RepeatProMaxPlugin(Star):
         if rec.get("date") != today:
             return []
         return list(rec.get("records", []))
+
+    def _hub_draw_used(self, gid: str, uid: str) -> int:
+        """读取本群成员今日随机抽取用量；强娶和求婚永远不会进入此账本。"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._hub_draw_usage.get("_date") != today:
+            return 0
+        counts = self._hub_draw_usage.get(gid, {})
+        if not isinstance(counts, dict):
+            return 0
+        try:
+            return max(0, int(counts.get(uid, 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _hub_consume_draw(self, gid: str, uid: str) -> int:
+        """随机抽取额度 +1 并返回最新用量；调用方必须在锁内。"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._hub_draw_usage.get("_date") != today:
+            self._hub_draw_usage = {"_date": today}
+        counts = self._hub_draw_usage.setdefault(gid, {})
+        if not isinstance(counts, dict):
+            counts = {}
+            self._hub_draw_usage[gid] = counts
+        used = self._hub_draw_used(gid, uid) + 1
+        counts[uid] = used
+        self._data_dirty = True
+        return used
 
     def _already_msg(self, user_recs: List[Dict], daily: int, mode: str, sender_name: str, sender_id: str) -> Tuple[str, str, str]:
         """构造已绑定提示: 返回 (tpl_key, 格式化文本, husband_id)"""
@@ -1070,11 +1378,6 @@ class RepeatProMaxPlugin(Star):
             rec["date"] = today
             rec["records"] = []
         return rec["records"]
-
-    def _hub_rbq_incr(self, gid: str, target_id: str) -> None:
-        """排行榜计数 +1（force/propose 共用）— 调用方必须在锁内"""
-        inner = self._hub_rbq.setdefault(gid, {})
-        inner[target_id] = inner.get(target_id, 0) + 1
 
     def _hub_active_pool(self, gid: str, uid: str, bid: str) -> List[str]:
         active = self._hub_active.get(gid, {})
@@ -1158,7 +1461,7 @@ class RepeatProMaxPlugin(Star):
 
     async def _hub_resolve_pool(self, event: AstrMessageEvent, gid: str,
                                  uid: str, bid: str) -> List[str]:
-        require_active = self._cfg.get("hub_require_active", True)
+        require_active = self._cfg.get("hub_require_active", False)
         if require_active:
             return self._hub_active_pool(gid, uid, bid)
         pool = await self._hub_all_members(event, gid, uid, bid)
@@ -1201,18 +1504,26 @@ class RepeatProMaxPlugin(Star):
         bid = str(getattr(event.message_obj, 'self_id', ''))
 
         daily = self._cfg["hub_daily"]
-        # 预检查：用 _hub_today 只读快照，避免锁外调用 _hub_init_today 导致引用悬空
+        # 额度由独立账本判断；关系记录只用于展示，强娶/求婚写入不会改额度。
+        used = self._hub_draw_used(gid, uid)
         pre_recs = self._hub_today(gid)
         user_recs = [r for r in pre_recs
                      if r["user_id"] == uid and r.get("source") in ("draw", "mutual")]
 
-        if len(user_recs) >= daily:
-            _, tpl, hid = self._already_msg(user_recs, daily, mode, event.get_sender_name() or uid, uid)
-            chains: List[Any] = []
-            if self._cfg.get("at_waifu"): chains.append(At(qq=hid))
-            chains.append(Plain(f" {tpl}"))
-            chains.append(Image.fromURL(f"https://q4.qlogo.cn/headimg_dl?dst_uin={hid}&spec=640"))
-            await event.send(event.chain_result(chains))
+        if used >= daily:
+            if user_recs:
+                _, tpl, hid = self._already_msg(
+                    user_recs, daily, mode, event.get_sender_name() or uid, uid)
+                chains: List[Any] = []
+                if self._cfg.get("at_waifu"): chains.append(At(qq=hid))
+                chains.append(Plain(f" {tpl}"))
+                chains.append(Image.fromURL(
+                    f"https://q4.qlogo.cn/headimg_dl?dst_uin={hid}&spec=640"))
+                await event.send(event.chain_result(chains))
+            else:
+                await event.send(event.plain_result(
+                    f"⏰ 今日随机抽取次数已用完（{used}/{daily}）。\n"
+                    "💡 强娶和求婚不会占用或返还随机抽取次数。"))
             return
 
         pool = await self._hub_resolve_pool(event, gid, uid, bid)
@@ -1231,39 +1542,49 @@ class RepeatProMaxPlugin(Star):
             # 在锁内获取 today_recs，确保引用不被 _sync_config 替换导致写入丢失
             today_recs = self._hub_init_today(gid)
             # double-check：防止并发抽取超过每日限制
-            user_recs = [r for r in today_recs
-                         if r["user_id"] == uid and r.get("source") in ("draw", "mutual")]
-            if len(user_recs) >= daily:
-                _, tpl2, hid2 = self._already_msg(user_recs, daily, mode, event.get_sender_name() or uid, uid)
-                already_msg = (tpl2, hid2)
+            used = self._hub_draw_used(gid, uid)
+            if used >= daily:
+                user_recs = [r for r in today_recs
+                             if r["user_id"] == uid and r.get("source") in ("draw", "mutual")]
+                if user_recs:
+                    _, tpl2, hid2 = self._already_msg(
+                        user_recs, daily, mode, event.get_sender_name() or uid, uid)
+                    already_msg = (tpl2, hid2)
+                else:
+                    already_msg = (
+                        f"⏰ 今日随机抽取次数已用完（{used}/{daily}）。", "")
             else:
-                remain = max(0, daily - len(user_recs) - 1)
                 already_msg = None
                 today_recs.append({
                     "user_id": uid, "user_name": event.get_sender_name() or uid,
                     "husband_id": husband_id, "husband_name": husband_name,
                     "ts": time.time(), "source": "draw",
                 })
+                new_used = self._hub_consume_draw(gid, uid)
+                remain = max(0, daily - new_used)
                 # 概率衰减：记录被抽时间，后续抽取时降低权重
                 self._hub_drawn_recent.setdefault(gid, {})[husband_id] = time.time()
                 if self._cfg.get("auto_set_other_half"):
-                    other_recs = [r for r in today_recs
-                                  if r["user_id"] == husband_id and r.get("source") in ("draw", "mutual")]
-                    if len(other_recs) < daily:
+                    other_used = self._hub_draw_used(gid, husband_id)
+                    if other_used < daily:
                         today_recs.append({
                             "user_id": husband_id, "user_name": husband_name,
                             "husband_id": uid, "husband_name": event.get_sender_name() or uid,
                             "ts": time.time(), "source": "mutual",
                         })
-        self._data_dirty = True
+                        self._hub_consume_draw(gid, husband_id)
         if already_msg:
             tpl2, hid2 = already_msg
+            if not hid2:
+                await event.send(event.plain_result(tpl2))
+                return
             chains2: List[Any] = []
             if self._cfg.get("at_waifu"): chains2.append(At(qq=hid2))
             chains2.append(Plain(f" {tpl2}"))
             chains2.append(Image.fromURL(f"https://q4.qlogo.cn/headimg_dl?dst_uin={hid2}&spec=640"))
             await event.send(event.chain_result(chains2))
             return
+        self._flush_persisted_data()
 
         tpl = self._hb("draw_result", mode).format(
             user=event.get_sender_name() or uid, husband=husband_name,
@@ -1308,13 +1629,12 @@ class RepeatProMaxPlugin(Star):
         uid = str(event.get_sender_id())
         recs = self._hub_today(gid)
         mine = [r for r in recs if r["user_id"] == uid]
-        # 仅统计 draw/mutual 来源用于剩余次数，force/propose 不计入抽取次数
-        mine_draw = [r for r in mine if r.get("source") in ("draw", "mutual")]
         daily = self._cfg["hub_daily"]
         if not mine:
             await event.send(event.plain_result(
                 self._hb("my_empty", mode).format(
-                    user=event.get_sender_name() or uid, remain=daily)))
+                    user=event.get_sender_name() or uid,
+                    remain=max(0, daily - self._hub_draw_used(gid, uid)))))
             return
         lines = []
         for i, r in enumerate(mine, 1):
@@ -1328,7 +1648,7 @@ class RepeatProMaxPlugin(Star):
             lines.append(f"  {i}. 【{r['husband_name']}】 {tag}")
         chains: List[Any] = [
             Plain(self._hb("my_header", mode) + "\n" + "\n".join(lines) +
-                  f"\n🎫 剩余次数 {max(0, daily - len(mine_draw))} 次"),
+                  f"\n🎫 剩余随机抽取 {max(0, daily - self._hub_draw_used(gid, uid))} 次"),
         ]
         await event.send(event.chain_result(chains))
 
@@ -1352,7 +1672,7 @@ class RepeatProMaxPlugin(Star):
         if target_id == uid:
             await event.send(event.plain_result(self._hb("force_self", mode))); return
 
-        force_daily = self._cfg.get("hub_force_daily", 1)
+        force_daily = self._cfg.get("hub_force_daily", 3)
         force_cd = self._cfg["hub_force_cd"]
         now = time.time()
 
@@ -1398,11 +1718,11 @@ class RepeatProMaxPlugin(Star):
                     "husband_id": target_id, "husband_name": target_name,
                     "ts": now, "source": "force",
                 })
-                self._hub_rbq_incr(gid, target_id)
                 self._data_dirty = True
         if lock_msg:
             await event.send(event.plain_result(lock_msg))
             return
+        self._flush_persisted_data()
 
         await event.send(event.chain_result([
             At(qq=uid),
@@ -1417,7 +1737,17 @@ class RepeatProMaxPlugin(Star):
         if not self._command_once(event, "rank"): return
         gid = await self._hub_guard(event, mode)
         if not gid: return
-        rbq = self._hub_rbq.get(gid, {})
+        # 排行榜只统计真正的随机抽取；指定强娶和求婚只进入个人记录。
+        rbq: Dict[str, int] = {}
+        names: Dict[str, str] = {}
+        for record in self._hub_today(gid):
+            if record.get("source", "draw") not in ("draw", "mutual"):
+                continue
+            target_id = str(record.get("husband_id", ""))
+            if not target_id:
+                continue
+            rbq[target_id] = rbq.get(target_id, 0) + 1
+            names[target_id] = record.get("husband_name", target_id)
         if not rbq:
             label = self._hb_label(mode)
             await event.send(event.plain_result(
@@ -1431,12 +1761,13 @@ class RepeatProMaxPlugin(Star):
             self._hb("rank_title", mode),
         ]
         for i, (uid, cnt) in enumerate(sorted_r[:10]):
-            name = self._hub_active.get(gid, {}).get(uid, {}).get("name", uid[:10])
+            name = names.get(uid) or self._hub_active.get(
+                gid, {}).get(uid, {}).get("name", uid[:10])
             medals = ["🥇", "🥈", "🥉"]
             pf = medals[i] if i < 3 else f"  {i+1:>2}."
             bar = "█" * min(cnt, 15)
             lines.append(f"  {pf} {name}  {cnt}次  {bar}")
-        lines.append("📌 被强娶次数越多越受欢迎！")
+        lines.append("📌 仅统计今日随机抽取；强娶与求婚不参与排行。")
         lines.append(f">> /{label}帮助 查看所有指令")
         await event.send(event.plain_result("\n".join(lines)))
 
@@ -1458,7 +1789,7 @@ class RepeatProMaxPlugin(Star):
                 mode = "husband"
             else:
                 await event.send(event.plain_result("❌ 老婆模式未开启，请在管理面板中启用「开启老婆模式」。")); return
-        active_status = ("✅ 全群随机抽取" if not self._cfg.get("hub_require_active", True)
+        active_status = ("✅ 全群随机抽取" if not self._cfg.get("hub_require_active", False)
                          else "🔒 随机抽取仅限活跃成员")
         label = self._hb_label(mode)
         force_label = self._hb_label(mode, "强娶老公", "强娶老婆")
@@ -1474,7 +1805,7 @@ class RepeatProMaxPlugin(Star):
             f"  /今日{label} /抽{label}   随机抽取今日{label}\n" +
             f"  /我的{label} /{label}记录 查看今日抽取记录\n" +
             f"  /{force_label} @用户    指定本群成员（不受活跃池限制）\n" +
-            f"  /{label}排行榜 /{label}排行 被强娶次数排行\n" +
+            f"  /{label}排行榜 /{label}排行 今日随机抽取人气排行\n" +
             f"  /不限制成员抽取     切换全群抽取/仅活跃\n" +
             f"  /{label}帮助          查看此帮助\n" +
             f"  /关系图 /gxt /羁绊图谱 生成羁绊关系图（含头像+统计）\n" +
@@ -1486,7 +1817,8 @@ class RepeatProMaxPlugin(Star):
             "  > 当前模式：" + mode_str + "\n" +
             "  > 活跃限制：" + active_status + "\n" +
             "  > 活跃限制只影响随机抽取；强娶仅校验群成员和排除名单。\n" +
-            "  > 每天可抽次数由管理员设定，强娶有冷却期。\n" +
+            "  > 随机抽取次数独立计数；强娶/求婚不会重置或占用额度。\n" +
+            "  > 强娶结果直接进入今日记录，但不参与排行榜。\n" +
             "  > 开启关键词触发后，可直接发关键词无需 / 前缀。"))
 
     async def _cmd_wife_help(self, event: AstrMessageEvent) -> None:
@@ -1497,6 +1829,7 @@ class RepeatProMaxPlugin(Star):
         gid = self._gid(event)
         if not gid: await event.send(event.plain_result("⚠️ 此功能仅在群聊中可用。")); return
         await self._hub_sync()
+        if not await self._check_hub_group_scope(event, gid): return
         hus, wife = self._hub_enabled()
         if not hus and not wife:
             await event.send(event.plain_result("❌ 抽老公/老婆功能未开启，请在管理面板中启用。"))
@@ -1505,7 +1838,7 @@ class RepeatProMaxPlugin(Star):
             await event.send(event.plain_result("⛔ 仅群主/管理员可切换抽取模式。"))
             return
         async with self.lock:
-            cur = self._cfg.get("hub_require_active", True)
+            cur = self._cfg.get("hub_require_active", False)
             new_val = not cur
             self._cfg["hub_require_active"] = new_val
             # 同步到持久化配置（兼容 AstrBotConfig 的 setitem 和 setattr）
@@ -1538,6 +1871,7 @@ class RepeatProMaxPlugin(Star):
         gid = self._gid(event)
         if not gid: await event.send(event.plain_result("⚠️ 此功能仅在群聊中可用。")); return
         await self._hub_sync()
+        if not await self._check_hub_group_scope(event, gid): return
         hus, wife = self._hub_enabled()
         if not hus and not wife:
             await event.send(event.plain_result("❌ 抽老公/老婆功能未开启，请在管理面板中启用。"))
@@ -1673,6 +2007,7 @@ class RepeatProMaxPlugin(Star):
         gid = self._gid(event)
         if not gid: await event.send(event.plain_result("⚠️ 此功能仅在群聊中可用。")); return
         await self._hub_sync()
+        if not await self._check_hub_group_scope(event, gid): return
         hus, wife = self._hub_enabled()
         if not hus and not wife:
             await event.send(event.plain_result("❌ 抽老公/老婆功能未开启，请在管理面板中启用。"))
@@ -1737,9 +2072,11 @@ class RepeatProMaxPlugin(Star):
                     "to": target_id, "to_name": target_name,
                     "mode": propose_mode, "ts": now_ts,
                 }
+                self._data_dirty = True
         if lock_msg:
             await event.send(event.plain_result(lock_msg))
             return
+        self._flush_persisted_data()
         invite = self._hb("propose_invite", propose_mode).format(
             user=user_name, label=label)
         await event.send(event.chain_result([
@@ -1753,6 +2090,7 @@ class RepeatProMaxPlugin(Star):
         gid = self._gid(e)
         if not gid: await e.send(e.plain_result("⚠️ 此功能仅在群聊中可用。")); return
         await self._hub_sync()
+        if not await self._check_hub_group_scope(e, gid): return
         hus, wife = self._hub_enabled()
         if not hus and not wife:
             await e.send(e.plain_result("❌ 抽老公/老婆功能未开启，请在管理面板中启用。"))
@@ -1785,7 +2123,6 @@ class RepeatProMaxPlugin(Star):
                     "husband_id": proposal["to"], "husband_name": proposal["to_name"],
                     "ts": now, "source": "propose",
                 })
-                self._hub_rbq_incr(gid, proposal["to"])
                 group_proposals.pop(uid, None)
                 if not group_proposals:
                     self._proposals.pop(gid, None)
@@ -1797,6 +2134,7 @@ class RepeatProMaxPlugin(Star):
         if no_proposal:
             await e.send(e.plain_result(self._hb("propose_none")))
             return
+        self._flush_persisted_data()
         if expired:
             await e.send(e.plain_result(self._hb("propose_expired")))
             return
@@ -1813,6 +2151,8 @@ class RepeatProMaxPlugin(Star):
         if not self._command_once(e, "reject_proposal"): return
         gid = self._gid(e)
         if not gid: await e.send(e.plain_result("⚠️ 此功能仅在群聊中可用。")); return
+        await self._hub_sync()
+        if not await self._check_hub_group_scope(e, gid): return
         uid = str(e.get_sender_id())
 
         no_proposal = False
@@ -1836,6 +2176,7 @@ class RepeatProMaxPlugin(Star):
         if no_proposal:
             await e.send(e.plain_result(self._hb("propose_none")))
             return
+        self._flush_persisted_data()
 
         await e.send(e.plain_result(
             self._hb("propose_reject", propose_mode).format(
@@ -1858,11 +2199,11 @@ class RepeatProMaxPlugin(Star):
         async with self.lock:
             if gid in self._hub_records:
                 self._hub_records.pop(gid, None)
-            if gid in self._hub_rbq:
-                self._hub_rbq.pop(gid, None)
+            self._hub_draw_usage.pop(gid, None)
             self._hub_drawn_recent.pop(gid, None)  # 同时重置轮换去重池
-        self._save_persisted_data()
-        await event.send(event.plain_result("✅ 本群抽取记录和排行榜已重置！"))
+            self._data_dirty = True
+        self._flush_persisted_data()
+        await event.send(event.plain_result("✅ 本群今日抽取记录与随机抽取额度已重置！"))
 
     async def _cmd_reset_force_cd(self, event: AstrMessageEvent) -> None:
         if not self._command_once(event, "reset_force_cd"): return
@@ -2004,7 +2345,7 @@ class RepeatProMaxPlugin(Star):
                 f"  /今日{main} /抽{main}   随机抽取今日{main}\n"
                 f"  /我的{main} /{main}记录  查看今日记录\n"
                 f"  /强娶{main} @用户    强行娶某人为{main}\n"
-                f"  /{main}排行 /{main}排行榜 被强娶排行\n"
+                f"  /{main}排行 /{main}排行榜 今日随机抽取人气排行\n"
                 f"  /不限制成员抽取     切换全群抽取模式\n"
                 f"  /{main}帮助          抽{main}帮助\n"
                 f"  /关系图 /gxt       生成羁绊关系图（含头像+统计）\n"
@@ -2015,7 +2356,7 @@ class RepeatProMaxPlugin(Star):
         else:
             hub_section = "💕 抽老公/老婆功能未开启，请在管理面板中启用。\n"
         await event.send(event.plain_result(
-            f"\U0001F4DF RepeatProMax v2.1.1 指令帮助\n{'─'*30}\n"
+            f"\U0001F4DF RepeatProMax v2.1.2 指令帮助\n{'─'*30}\n"
             f"🔧 管理（仅群聊）\n"
             "  /复读开启          在本群开启复读\n"
             "  /复读关闭          在本群关闭复读\n"
@@ -2023,7 +2364,7 @@ class RepeatProMaxPlugin(Star):
             "  /复读统计          本群今日/本周/累计\n"
             f"{'─'*30}\n{hub_section}"
             f"{'─'*30}\n"
-            f"🔥 v2.1.1: 品牌升级为 RepeatProMax\n"
+            f"🔥 v2.1.2: 修复 QQ 表情复读、触发计数与抽取额度串写\n"
             f"⚙️ 更多参数请在 WebUI 管理面板调整"))
 
     # ============================================================
@@ -2049,24 +2390,33 @@ class RepeatProMaxPlugin(Star):
         await self._sync_config()
         cfg = self._cfg
 
-        # 群组白名单/黑名单检查（仅影响复读功能）
-        wl = cfg.get("whitelist_groups", set())
-        bl = cfg.get("blacklist_groups", set())
-        if wl and gid not in wl:
+        # 玩法群白/黑名单只限制关系玩法，不能误伤独立的复读功能。
+        if gid in cfg["ignored_groups"]:
+            self._dbg(f"群 {gid} 位于复读排除群列表")
             return
-        if bl and gid in bl:
+        if sid in cfg["ignored_users"]:
+            self._dbg(f"用户 {sid} 位于复读排除用户列表")
             return
-
-        if gid in cfg["ignored_groups"] or sid in cfg["ignored_users"]: return
-        if gid in self.disabled_groups: return
+        if gid in self.disabled_groups:
+            self._dbg(f"群 {gid} 已通过指令关闭复读")
+            return
 
         effective_cd = self._get_cd(gid)
         now = time.time()
-        if now - self.last_repeat_time.get(gid, 0) < effective_cd: return
+        remain_cd = effective_cd - (now - self.last_repeat_time.get(gid, 0))
+        if remain_cd > 0:
+            self._dbg(f"群 {gid} 复读冷却中，剩余 {remain_cd:.1f}s")
+            return
 
-        chain = getattr(mo, 'message', [])
+        raw_chain = getattr(mo, 'message', [])
+        chain = self._augment_repeat_chain(
+            raw_chain, getattr(mo, 'raw_message', None))
         sig, txt = self._sig(chain)
-        if not sig: return
+        if not sig:
+            self._dbg(
+                f"群 {gid} 消息没有可识别的文字、图片或表情组件: "
+                f"{[type(c).__name__ for c in (raw_chain or [])]}")
+            return
 
         stripped = txt.strip() if txt else ""
         # 抽老公/老婆关键词触发（支持 exact/starts_with/contains 三种模式）
@@ -2103,9 +2453,12 @@ class RepeatProMaxPlugin(Star):
         hist.append((sig, sid, txt, event.get_sender_name() or sid))
 
         threshold = cfg["threshold"]
-        if len(hist) < threshold: return
+        if len(hist) < threshold:
+            self._dbg(f"群 {gid} 复读进度 {len(hist)}/{threshold}，签名 {sig[:80]}")
+            return
 
         wc, lm = self._weighted(hist, sig, txt)
+        self._dbg(f"群 {gid} 复读匹配 {wc:.2f}/{threshold}，签名 {sig[:80]}")
         if wc >= float(threshold) and lm:
             async with self.lock:
                 if time.time() - self.last_repeat_time.get(gid, 0) < effective_cd:

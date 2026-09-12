@@ -44,7 +44,7 @@
         "group": "🎯 复读触发",
         "description": "参与复读的最短文字",
         "type": "int",
-        "default": 1,
+        "default": 0,
         "min": 0,
         "hint": "短于该长度的纯文字不参与复读。设为 2 可过滤“啊”“？”等单字；0 表示不限制。",
         "max": 100
@@ -119,7 +119,7 @@
         "group": "🎭 趣味打断",
         "description": "启用自定义打断文案",
         "type": "bool",
-        "default": true,
+        "default": false,
         "hint": "加入随机打断候选：从下面的“自定义打断文案”中随机选择一行发送。"
     },
     "interrupt_silent": {
@@ -147,14 +147,14 @@
         "group": "🎨 回复体验",
         "description": "立即回复模式",
         "type": "bool",
-        "default": false,
-        "hint": "开启后忽略“回复延迟范围”，所有复读立即发送。适合测试，日常群聊建议关闭。"
+        "default": true,
+        "hint": "开启后忽略“回复延迟范围”，所有复读立即发送；关闭后按延迟范围模拟自然回复节奏。"
     },
     "content_blacklist": {
         "group": "🛡️ 复读过滤",
         "description": "不复读的内容（正则）",
         "type": "text",
-        "default": "admin|【",
+        "default": "admin|【|抽老婆|抽老公",
         "hint": "匹配该正则表达式的纯文字不会被复读。多个关键词可用 | 分隔；留空表示关闭。填写错误的正则时插件会记录错误并跳过此过滤。"
     },
     "ignored_groups": {
@@ -189,10 +189,10 @@
         "group": "💕 抽取玩法",
         "description": "每人每日随机抽取次数",
         "type": "int",
-        "default": 1,
+        "default": 10,
         "min": 1,
         "max": 10,
-        "hint": "每位成员每天可使用随机抽取的次数。只统计随机抽取和自动双向绑定，不计入强娶与求婚。"
+        "hint": "每位成员在每个群中每天可使用随机抽取的次数。额度独立保存，只统计随机抽取和自动双向绑定；强娶与求婚不会占用、返还或重置额度。"
     },
     "husband_active_days": {
         "group": "💕 抽取玩法",
@@ -207,7 +207,7 @@
         "group": "💕 抽取玩法",
         "description": "随机抽取只选活跃成员",
         "type": "bool",
-        "default": true,
+        "default": false,
         "hint": "开启：随机抽取使用最近活跃成员；关闭：随机抽取尝试读取全部群成员。强娶始终只校验群成员身份和排除名单。"
     },
     "husband_draw_decay_days": {
@@ -262,10 +262,10 @@
         "group": "💍 强娶与求婚",
         "description": "每群每日强娶次数",
         "type": "int",
-        "default": 1,
+        "default": 3,
         "min": 0,
         "max": 99,
-        "hint": "每位成员在每个群中每天最多成功强娶多少次。0 表示不限制；失败的成员校验不会消耗次数。"
+        "hint": "每位成员在每个群中每天最多成功强娶多少次。0 表示不限制；失败校验不消耗次数。成功结果进入今日抽取记录，但不计入随机抽取额度与排行榜。"
     },
     "husband_propose_daily": {
         "group": "💍 强娶与求婚",
@@ -296,7 +296,7 @@
         "group": "⚙️ 玩法增强",
         "description": "允许无斜杠关键词",
         "type": "bool",
-        "default": false,
+        "default": true,
         "hint": "开启后可直接发送“抽老公”“我的老婆”等文字触发，不需要 / 前缀。建议搭配“完全匹配”避免误触发。"
     },
     "keyword_trigger_mode": {

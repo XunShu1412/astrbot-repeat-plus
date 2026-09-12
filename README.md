@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.1.2-blue?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-v2.1.3-blue?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.0.0-green?style=flat-square" alt="astrbot">
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/python-3.8+-purple?style=flat-square" alt="python">
@@ -237,6 +237,7 @@ playwright install chromium
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| **v2.1.3** | 2026-09-12 | 修复 QQ 收藏/自定义表情使用临时文件名时无法识别为同一内容；优先读取原始 OneBot 的 `file_unique` 与稳定媒体标识 |
 | **v2.1.2** | 2026-09-12 | 修复 QQ 商城/动态表情复读、触发计数及玩法群名单误伤；随机抽取额度改为独立持久化账本，强娶/求婚不再重置额度或参与排行；增加状态诊断与自动化测试 |
 | **v2.1.1** | 2026-09-12 | 项目品牌由 RepeatPlus 升级为 RepeatProMax，同步插件标识、后台展示名、代码类名与仓库地址 |
 | **v2.1.0** | 2026-09-12 | 强娶改为本群成员校验且不受活跃池限制；修复关键词重复触发、求婚覆盖、活跃池缓存与关系图 CDN 竞态；扩充 100+ 条场景文案 |

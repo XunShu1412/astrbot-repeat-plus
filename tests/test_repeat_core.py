@@ -281,6 +281,70 @@ class RepeatCoreTests(unittest.IsolatedAsyncioTestCase):
         events = await send_three(plugin, image)
         self.assertEqual(len(events[2].sent), 1)
 
+    async def test_favorite_emoji_uses_raw_file_unique(self):
+        plugin = make_plugin()
+        stable_unique = "f5ef025d465873a0a025bb0b6de3bb5b.jpg"
+
+        def image(index):
+            # AstrBot Image 不声明 file_unique，模拟该字段只存在于原始 OneBot 段。
+            return [Image(
+                file=f"temporary-message-file-{index}.jpg",
+                url=f"https://multimedia.nt.qq.com.cn/download?fileid=temp-{index}&rkey={index}",
+            )]
+
+        def raw(index):
+            return {"message": [{
+                "type": "image",
+                "data": {
+                    "summary": "[动画表情]",
+                    "file": f"temporary-message-file-{index}.jpg",
+                    "url": f"https://multimedia.nt.qq.com.cn/download?fileid=temp-{index}&rkey={index}",
+                    "file_unique": stable_unique,
+                    "file_size": 264118,
+                },
+            }]}
+
+        events = await send_three(plugin, image, raw_factory=raw)
+        self.assertEqual(len(events[2].sent), 1)
+
+    async def test_image_prefers_stable_url_over_changing_temp_filename(self):
+        plugin = make_plugin()
+
+        def image(index):
+            return [Image(
+                file=f"temporary-{index}.jpg",
+                url=f"https://cdn.example.test/favorite/stable-image?rkey={index}",
+            )]
+
+        events = await send_three(plugin, image)
+        self.assertEqual(len(events[2].sent), 1)
+
+    async def test_different_favorite_emoji_unique_ids_do_not_match(self):
+        plugin = make_plugin()
+
+        def raw(index):
+            return {"message": [{
+                "type": "image",
+                "data": {
+                    "file": f"temporary-{index}.jpg",
+                    "file_unique": f"{index + 1:032x}.jpg",
+                },
+            }]}
+
+        events = await send_three(
+            plugin,
+            lambda index: [Image(file=f"temporary-{index}.jpg")],
+            raw_factory=raw,
+        )
+        self.assertEqual(events[2].sent, [])
+
+    async def test_bot_own_image_is_never_counted_as_repeat_input(self):
+        plugin = make_plugin()
+        event = FakeEvent([Image(file="same.jpg")], sender="99999")
+        await plugin._pipe(event)
+        self.assertEqual(event.sent, [])
+        self.assertEqual(plugin.group_history, {})
+
     async def test_different_market_faces_do_not_match(self):
         plugin = make_plugin()
         events = await send_three(

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AstrBot 复读增强插件 ProMax v2.1.2 — 表情复读与触发链路修复"""
+"""AstrBot 复读增强插件 ProMax v2.1.3 — 收藏表情稳定识别修复"""
 
 import random, logging, time, re, copy, asyncio, json, os, hashlib
 from typing import Dict, List, Set, Optional, Tuple, Any
@@ -435,7 +435,7 @@ class RepeatProMaxPlugin(Star):
         # 关键词路由表
         self._build_hub_keywords()
 
-        self._log(logging.INFO, "插件已加载 ProMax v2.1.2")
+        self._log(logging.INFO, "插件已加载 ProMax v2.1.3")
 
     # ============================================================
     # 数据持久化
@@ -1004,17 +1004,26 @@ class RepeatProMaxPlugin(Star):
                 component, "emoji_package_id", "emojiPackageId", "pack_id", "packId") or "0"
             return f"E:{package_id}:{emoji_id}"
 
-        for name in ("md5", "file_md5", "fileMd5", "sha256", "checksum"):
+        for name in (
+            "md5", "file_md5", "fileMd5", "sha256", "checksum",
+            "file_unique", "fileUnique",
+        ):
             value = cls._component_value(component, name)
             if value is not None:
-                return "H:" + str(value).lower()
+                identity = cls._canonical_media_ref(value)
+                if identity:
+                    return identity if identity.startswith("H:") else "H:" + str(value).lower()
 
-        # file 通常是 QQ 内容文件名；URL 作为回退并移除会变化的鉴权参数。
+        # 同时评估全部来源：内容摘要 > 清理后的 URL > 普通文件名。
+        # 收藏表情的 file 可能每次变化，不能因它先出现就忽略更稳定的 url。
+        candidates: List[Tuple[int, str]] = []
         for name in ("file", "path", "url", "file_id", "fileId"):
             identity = cls._canonical_media_ref(cls._component_value(component, name))
             if identity:
-                return identity
-        return ""
+                priority = 3 if identity.startswith("H:") else (
+                    2 if identity.startswith("U:") else 1)
+                candidates.append((priority, identity))
+        return max(candidates, key=lambda item: item[0])[1] if candidates else ""
 
     @classmethod
     def _raw_segments(cls, raw_message: Any) -> List[Any]:
@@ -1079,20 +1088,38 @@ class RepeatProMaxPlugin(Star):
             existing.add(identity)
         return result
 
-    def _sig(self, chain: List[Any]) -> Tuple[str, str]:
+    @classmethod
+    def _raw_image_identities(cls, raw_message: Any) -> List[str]:
+        """读取原始 image 段，保留 AstrBot 图片模型可能丢弃的 file_unique 等字段。"""
+        identities: List[str] = []
+        for segment in cls._raw_segments(raw_message):
+            if str(cls._component_value(segment, "type") or "").lower() != "image":
+                continue
+            data = cls._component_value(segment, "data")
+            data = data if isinstance(data, dict) else segment
+            identity = cls._image_identity(data)
+            if identity:
+                identities.append(identity)
+        return identities
+
+    def _sig(self, chain: List[Any], raw_message: Any = None) -> Tuple[str, str]:
         if not chain: return "", ""
         parts: List[str] = []
         text = ""
+        raw_images = iter(self._raw_image_identities(raw_message))
         for c in chain:
             if isinstance(c, Plain):
                 t = getattr(c, 'text', '').strip()
                 if t: parts.append(f"T:{t}"); text += t
             elif isinstance(c, Image):
-                identity = self._image_identity(c)
+                # 原始 OneBot 段比 AstrBot Image 模型保留的字段更多，优先使用。
+                identity = next(raw_images, "") or self._image_identity(c)
                 if identity: parts.append(f"I:{identity}")
             elif isinstance(c, Face):
                 v = self._component_value(c, "id", "face_id", "number")
                 if v is not None: parts.append(f"F:{v}")
+        # 兼容某些适配器未把 image 段加入消息链的情况。
+        parts.extend(f"I:{identity}" for identity in raw_images)
         return "|".join(parts), text
 
     @staticmethod
@@ -2356,7 +2383,7 @@ class RepeatProMaxPlugin(Star):
         else:
             hub_section = "💕 抽老公/老婆功能未开启，请在管理面板中启用。\n"
         await event.send(event.plain_result(
-            f"\U0001F4DF RepeatProMax v2.1.2 指令帮助\n{'─'*30}\n"
+            f"\U0001F4DF RepeatProMax v2.1.3 指令帮助\n{'─'*30}\n"
             f"🔧 管理（仅群聊）\n"
             "  /复读开启          在本群开启复读\n"
             "  /复读关闭          在本群关闭复读\n"
@@ -2364,7 +2391,7 @@ class RepeatProMaxPlugin(Star):
             "  /复读统计          本群今日/本周/累计\n"
             f"{'─'*30}\n{hub_section}"
             f"{'─'*30}\n"
-            f"🔥 v2.1.2: 修复 QQ 表情复读、触发计数与抽取额度串写\n"
+            f"🔥 v2.1.3: 修复 QQ 收藏/自定义表情无法复读\n"
             f"⚙️ 更多参数请在 WebUI 管理面板调整"))
 
     # ============================================================
@@ -2411,7 +2438,7 @@ class RepeatProMaxPlugin(Star):
         raw_chain = getattr(mo, 'message', [])
         chain = self._augment_repeat_chain(
             raw_chain, getattr(mo, 'raw_message', None))
-        sig, txt = self._sig(chain)
+        sig, txt = self._sig(chain, getattr(mo, 'raw_message', None))
         if not sig:
             self._dbg(
                 f"群 {gid} 消息没有可识别的文字、图片或表情组件: "

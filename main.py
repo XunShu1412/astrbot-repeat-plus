@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AstrBot 复读增强插件 ProMax v2.1.5 — 更新安全的数据持久化"""
+"""AstrBot 复读增强插件 ProMax v2.1.6 — 富媒体发送失败自动降级"""
 
 import random, logging, time, re, copy, asyncio, json, os, hashlib, shutil
 from typing import Dict, List, Set, Optional, Tuple, Any
@@ -488,7 +488,7 @@ class RepeatProMaxPlugin(Star):
         # 关键词路由表
         self._build_hub_keywords()
 
-        self._log(logging.INFO, "插件已加载 ProMax v2.1.5")
+        self._log(logging.INFO, "插件已加载 ProMax v2.1.6")
 
     # ============================================================
     # 数据持久化
@@ -787,6 +787,28 @@ class RepeatProMaxPlugin(Star):
         if minutes: parts.append(f"{minutes}分钟")
         if secs or not parts: parts.append(f"{secs}秒")
         return "".join(parts[:2])
+
+    async def _send_hub_avatar_result(self, event: AstrMessageEvent, text: str,
+                                      avatar_qq: str,
+                                      at_qq: Optional[str] = None) -> Any:
+        """发送玩法头像结果；QQ 富媒体失败时自动退回可靠的纯文字消息。"""
+        chains: List[Any] = []
+        if at_qq:
+            chains.append(At(qq=at_qq))
+        chains.append(Plain(f" {text}"))
+        chains.append(Image.fromURL(
+            f"https://q4.qlogo.cn/headimg_dl?dst_uin={avatar_qq}&spec=640"))
+        try:
+            return await event.send(event.chain_result(chains))
+        except Exception as e:
+            error_text = " ".join(str(e).split())
+            if len(error_text) > 180:
+                error_text = error_text[:177] + "..."
+            self._log(
+                logging.WARNING,
+                f"QQ {avatar_qq} 头像发送失败，已降级为纯文字结果: {error_text}")
+            return await event.send(event.plain_result(
+                "🖼️ 头像暂时发送失败，以下为本次抽取结果：\n" + text.strip()))
 
     def _hb(self, key: str, mode: str = "husband") -> str:
         """Husband/Wife Bridge: 返回一条随机模板(已应用性别替换)"""
@@ -1632,12 +1654,9 @@ class RepeatProMaxPlugin(Star):
             if user_recs:
                 _, tpl, hid = self._already_msg(
                     user_recs, daily, mode, event.get_sender_name() or uid, uid)
-                chains: List[Any] = []
-                if self._cfg.get("at_waifu"): chains.append(At(qq=hid))
-                chains.append(Plain(f" {tpl}"))
-                chains.append(Image.fromURL(
-                    f"https://q4.qlogo.cn/headimg_dl?dst_uin={hid}&spec=640"))
-                await event.send(event.chain_result(chains))
+                await self._send_hub_avatar_result(
+                    event, tpl, hid,
+                    hid if self._cfg.get("at_waifu") else None)
             else:
                 await event.send(event.plain_result(
                     f"⏰ 今日随机抽取次数已用完（{used}/{daily}）。\n"
@@ -1656,8 +1675,6 @@ class RepeatProMaxPlugin(Star):
         husband_id = self._hub_weighted_choice(gid, pool)
         self._dbg(f"抽取池大小={len(pool)}, 抽中={husband_id}")
         husband_name = self._hub_active.get(gid, {}).get(husband_id, {}).get("name", f"用户({husband_id})")
-        avatar_url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={husband_id}&spec=640"
-
         async with self.lock:
             # 在锁内获取 today_recs，确保引用不被 _sync_config 替换导致写入丢失
             today_recs = self._hub_init_today(gid)
@@ -1698,11 +1715,9 @@ class RepeatProMaxPlugin(Star):
             if not hid2:
                 await event.send(event.plain_result(tpl2))
                 return
-            chains2: List[Any] = []
-            if self._cfg.get("at_waifu"): chains2.append(At(qq=hid2))
-            chains2.append(Plain(f" {tpl2}"))
-            chains2.append(Image.fromURL(f"https://q4.qlogo.cn/headimg_dl?dst_uin={hid2}&spec=640"))
-            await event.send(event.chain_result(chains2))
+            await self._send_hub_avatar_result(
+                event, tpl2, hid2,
+                hid2 if self._cfg.get("at_waifu") else None)
             return
         self._flush_persisted_data()
 
@@ -1710,12 +1725,9 @@ class RepeatProMaxPlugin(Star):
             user=event.get_sender_name() or uid, husband=husband_name,
             suffix=self._hb("draw_suffix", mode).format(remain=remain))
 
-        chains: List[Any] = []
-        if self._cfg.get("at_waifu"):
-            chains.append(At(qq=husband_id))
-        chains.append(Plain(f" {tpl}"))
-        chains.append(Image.fromURL(avatar_url))
-        result = await event.send(event.chain_result(chains))
+        result = await self._send_hub_avatar_result(
+            event, tpl, husband_id,
+            husband_id if self._cfg.get("at_waifu") else None)
 
         # auto_withdraw
         if self._cfg.get("auto_withdraw_enabled") and result:
@@ -1813,8 +1825,6 @@ class RepeatProMaxPlugin(Star):
             await event.send(event.plain_result(self._hb("force_verify_failed", mode)))
             return
         user_name = event.get_sender_name() or uid
-        avatar_url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={target_id}&spec=640"
-
         async with self.lock:
             # 在锁内获取 today_recs，确保引用不被 _sync_config 替换导致写入丢失
             today_recs = self._hub_init_today(gid)
@@ -1847,11 +1857,13 @@ class RepeatProMaxPlugin(Star):
         cooldown_tip = (f"⏳ 下次强娶：{force_cd} 天后可用"
                         if force_cd > 0 else "✨ 当前未启用强娶冷却")
 
-        await event.send(event.chain_result([
-            At(qq=uid),
-            Plain(f" {self._hb('force_ok', mode).format(user=user_name, target=target_name, cooldown_tip=cooldown_tip)}"),
-            Image.fromURL(avatar_url),
-        ]))
+        await self._send_hub_avatar_result(
+            event,
+            self._hb('force_ok', mode).format(
+                user=user_name, target=target_name, cooldown_tip=cooldown_tip),
+            target_id,
+            uid,
+        )
 
     async def _cmd_wife_force(self, event: AstrMessageEvent) -> None:
         await self._cmd_husband_force(event, mode="wife")
@@ -2508,7 +2520,7 @@ class RepeatProMaxPlugin(Star):
         else:
             hub_section = "💕 抽老公/老婆功能未开启，请在管理面板中启用。\n"
         await event.send(event.plain_result(
-            f"\U0001F4DF RepeatProMax v2.1.5 指令帮助\n{'─'*30}\n"
+            f"\U0001F4DF RepeatProMax v2.1.6 指令帮助\n{'─'*30}\n"
             f"🔧 管理（仅群聊）\n"
             "  /复读开启          在本群开启复读\n"
             "  /复读关闭          在本群关闭复读\n"
@@ -2516,7 +2528,7 @@ class RepeatProMaxPlugin(Star):
             "  /复读统计          本群今日/本周/累计\n"
             f"{'─'*30}\n{hub_section}"
             f"{'─'*30}\n"
-            f"🔥 v2.1.5：玩法数据迁移至更新安全的持久化目录\n"
+            f"🔥 v2.1.6：头像发送失败时自动返回纯文字抽取结果\n"
             f"⚙️ 更多参数请在 WebUI 管理面板调整"))
 
     # ============================================================

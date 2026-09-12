@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.1.5-blue?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-v2.1.6-blue?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.0.0-green?style=flat-square" alt="astrbot">
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/python-3.8+-purple?style=flat-square" alt="python">
@@ -237,6 +237,7 @@ playwright install chromium
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| **v2.1.6** | 2026-09-12 | 抽取与强娶头像发送失败时自动降级为纯文字结果，避免 QQ `rich media transfer failed` 导致结果无响应 |
 | **v2.1.5** | 2026-09-12 | 玩法数据迁移至 AstrBot 标准持久化目录；修复复读冷却期间无前缀抽取指令无响应，并加入更新安全迁移与回归测试 |
 | **v2.1.4** | 2026-09-12 | 全面优化用户话术和后台说明；区分活跃池/全群池空提示，统一随机额度与求婚反馈，修复老婆模式“其他”误替换、最近结果取错及过期求婚长期占位 |
 | **v2.1.3** | 2026-09-12 | 修复 QQ 收藏/自定义表情使用临时文件名时无法识别为同一内容；优先读取原始 OneBot 的 `file_unique` 与稳定媒体标识 |

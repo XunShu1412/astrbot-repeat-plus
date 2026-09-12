@@ -233,6 +233,134 @@ async def send_three(plugin, chain_factory, senders=("10001", "10001", "10001"),
 
 
 class RepeatCoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_multiple_users_can_switch_from_wife_draws_to_husband_draws(self):
+        plugin = make_plugin(hub_keyword=True, cooldown=10, hub_daily=10)
+        targets = [f"3000{i}" for i in range(1, 8)]
+        for target in targets:
+            plugin._hub_active.setdefault("20001", {})[target] = {
+                "name": f"候选-{target}", "ts": time.time(),
+            }
+
+        async def full_pool(*_):
+            return list(targets)
+
+        selected = iter(targets)
+        plugin._hub_resolve_pool = full_pool
+        plugin._hub_weighted_choice = lambda *_: next(selected)
+        original_hb = plugin._hb
+
+        def deterministic_hb(key, mode="husband"):
+            if key == "draw_result":
+                label = "老婆" if mode == "wife" else "老公"
+                return f"{{user}} 抽到今日{label}【{{husband}}】\n{{suffix}}"
+            if key == "draw_suffix":
+                return "今日剩余随机抽取 {remain} 次"
+            return original_hb(key, mode)
+
+        plugin._hb = deterministic_hb
+        plugin._hub_kw = {
+            "抽老婆": plugin._cmd_wife_draw,
+            "抽老公": plugin._cmd_husband_draw,
+        }
+
+        sequence = [
+            ("10001", "抽老婆"),
+            ("10002", "抽老婆"),
+            ("10003", "抽老婆"),
+            ("10004", "抽老婆"),
+            ("10001", "抽老公"),
+            ("10002", "抽老公"),
+            ("10003", "抽老公"),
+        ]
+        events = []
+        for sender, command in sequence:
+            event = FakeEvent([Plain(command)], sender=sender)
+            events.append(event)
+            await plugin._pipe(event)
+
+        self.assertTrue(all(len(event.sent) == 1 for event in events))
+        wife_texts = [next(c.text for c in event.sent[0] if isinstance(c, Plain))
+                      for event in events[:4]]
+        husband_texts = [next(c.text for c in event.sent[0] if isinstance(c, Plain))
+                         for event in events[4:]]
+        self.assertTrue(all("老婆" in text and "老公" not in text for text in wife_texts))
+        self.assertTrue(all("老公" in text and "老婆" not in text for text in husband_texts))
+        self.assertEqual(plugin._hub_draw_used("20001", "10001"), 2)
+        self.assertEqual(plugin._hub_draw_used("20001", "10002"), 2)
+        self.assertEqual(plugin._hub_draw_used("20001", "10003"), 2)
+        self.assertEqual(plugin._hub_draw_used("20001", "10004"), 1)
+        records = plugin._hub_today("20001")
+        self.assertEqual(len(records), 7)
+        self.assertEqual([record["husband_id"] for record in records], targets)
+        self.assertTrue(all(record["source"] == "draw" for record in records))
+
+    async def test_avatar_transfer_failure_falls_back_to_text_result(self):
+        plugin = make_plugin(hub_daily=10)
+        plugin._log = lambda *args, **kwargs: None
+        plugin._hub_active = {
+            "20001": {"30001": {"name": "候选成员", "ts": time.time()}}
+        }
+
+        async def full_pool(*_):
+            return ["30001"]
+
+        plugin._hub_resolve_pool = full_pool
+        plugin._hub_weighted_choice = lambda *_: "30001"
+        event = FakeEvent([Plain("抽老婆")])
+        attempts = []
+
+        async def flaky_send(result):
+            attempts.append(result)
+            if isinstance(result, list) and any(isinstance(c, Image) for c in result):
+                raise RuntimeError("rich media transfer failed")
+            event.sent.append(result)
+            return result
+
+        event.send = flaky_send
+        await plugin._cmd_wife_draw(event)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(event.sent), 1)
+        self.assertIn("头像暂时发送失败", event.sent[0])
+        self.assertIn("候选成员", event.sent[0])
+        self.assertEqual(plugin._hub_draw_used("20001", "10001"), 1)
+        self.assertEqual(len(plugin._hub_today("20001")), 1)
+
+    async def test_switching_draw_mode_cannot_reset_or_bypass_daily_limit(self):
+        plugin = make_plugin(hub_keyword=True, hub_daily=3)
+        targets = ["30001", "30002", "30003", "30004"]
+        plugin._hub_active = {
+            "20001": {
+                target: {"name": f"候选-{target}", "ts": time.time()}
+                for target in targets
+            }
+        }
+
+        async def full_pool(*_):
+            return list(targets)
+
+        selected = iter(targets)
+        plugin._hub_resolve_pool = full_pool
+        plugin._hub_weighted_choice = lambda *_: next(selected)
+        plugin._hub_kw = {
+            "抽老婆": plugin._cmd_wife_draw,
+            "抽老公": plugin._cmd_husband_draw,
+        }
+
+        events = []
+        for command in ("抽老婆", "抽老婆", "抽老婆", "抽老公"):
+            event = FakeEvent([Plain(command)], sender="10001")
+            events.append(event)
+            await plugin._pipe(event)
+
+        self.assertTrue(all(len(event.sent) == 1 for event in events))
+        self.assertEqual(plugin._hub_draw_used("20001", "10001"), 3)
+        self.assertEqual(len(plugin._hub_today("20001")), 3)
+        limit_reply = next(
+            c.text for c in events[-1].sent[0] if isinstance(c, Plain))
+        self.assertIn("3", limit_reply)
+        self.assertIn("候选-30003", limit_reply)
+
     async def test_gameplay_keyword_still_runs_during_repeat_cooldown(self):
         plugin = make_plugin(hub_keyword=True, cooldown=10)
         plugin.last_repeat_time["20001"] = time.time()
@@ -547,7 +675,9 @@ class RepeatCoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(plugin._hub_propose_count.get("10001", 0), 0)
         self.assertEqual(plugin._proposals, {})
-        self.assertTrue("本群" in event.sent[0] or "当前群" in event.sent[0])
+        self.assertIn("群", event.sent[0])
+        self.assertTrue("未发送" in event.sent[0] or "重新选择" in event.sent[0] or
+                        "只能" in event.sent[0] or "校验未通过" in event.sent[0])
 
     async def test_proposal_daily_reset_does_not_touch_draw_usage(self):
         plugin = make_plugin()

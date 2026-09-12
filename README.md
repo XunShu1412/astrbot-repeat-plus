@@ -41,7 +41,7 @@
 ### 安装
 
 ```
-1. 下载 astrbot_plugin_repeat_plus_v1.2.2.zip（见 Release）
+1. 下载仓库最新 Release 中的插件压缩包
 2. AstrBot WebUI → 插件管理 → 上传插件包
 3. 启用插件
 4. 群内发送 /复读开启
@@ -278,7 +278,7 @@ playwright install chromium
 <details>
 <summary><b>Q: 数据会丢失吗？</b></summary>
 
-不会。排行榜、抽取记录、活跃数据、强娶 CD 全部持久化到 `data/` 目录，跨重启保留。排行榜保留 30 天后自动清理。
+会。抽取记录、活跃数据、强娶排行榜和强娶 CD 全部持久化到 `data/` 目录，跨重启保留。
 </details>
 
 <details>

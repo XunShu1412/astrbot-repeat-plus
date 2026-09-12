@@ -5,7 +5,7 @@
   <img src="https://img.shields.io/badge/python-3.8+-purple?style=flat-square" alt="python">
 </p>
 
-<h1 align="center">RepeatPlus-Enterprise</h1>
+<h1 align="center">RepeatProMax-Enterprise</h1>
 <p align="center"><b>QQ 群复读增强插件</b> — 集复读、打断、统计、抽老公/老婆、关系图、求婚于一体</p>
 
 ---

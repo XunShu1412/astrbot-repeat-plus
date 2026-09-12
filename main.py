@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AstrBot 复读增强插件 ProMax v2.1.4 — 交互话术与状态提示优化"""
+"""AstrBot 复读增强插件 ProMax v2.1.5 — 更新安全的数据持久化"""
 
-import random, logging, time, re, copy, asyncio, json, os, hashlib
+import random, logging, time, re, copy, asyncio, json, os, hashlib, shutil
 from typing import Dict, List, Set, Optional, Tuple, Any
 from collections import deque
 from difflib import SequenceMatcher
@@ -11,13 +11,14 @@ from datetime import datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star
+from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.message_components import Plain, Image, Face, At
 from astrbot.api import AstrBotConfig
 
 logger = logging.getLogger("astrbot")
 
 PLUGIN_NAME = "RepeatProMax"
+PLUGIN_ID = "astrbot_plugin_repeat_promax"
 LOG_PREFIX = f"[{PLUGIN_NAME}]"
 DEFAULT_COOLDOWN = 10
 CLEANUP_INTERVAL = 3600
@@ -47,8 +48,12 @@ HUSBAND_FORCE_CD_DAYS = 3
 HUSBAND_DAILY_LIMIT = 10
 MAX_RECORDS_DEFAULT = 500
 
-# 数据持久化目录
-_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+# 旧版把数据放在插件目录内；仅用于首次迁移，后续使用 AstrBot 标准持久化目录。
+_LEGACY_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+_PERSISTED_DATA_FILES = (
+    "active_users.json", "forced_marriage.json", "wife_records.json",
+    "draw_usage.json", "propose_cd.json", "propose_count.json", "proposals.json",
+)
 
 # 抽老公/老婆话术模板 — 轻松群聊风
 # 老婆模式通过 _T() 运行时替换性别词，业务逻辑只维护一套模板。
@@ -466,20 +471,51 @@ class RepeatProMaxPlugin(Star):
         self._hub_propose_cd: Dict[str, float] = {}
         self._hub_propose_count: Dict[str, int] = {}
 
-        # 数据持久化
-        self._data_dir = _DATA_DIR
+        # 数据持久化：data/plugin_data 下的目录不会在插件更新时被删除。
+        try:
+            self._data_dir = str(StarTools.get_data_dir(PLUGIN_ID))
+        except Exception as e:
+            # 兼容测试环境和缺少 StarTools 的旧版 AstrBot。
+            self._data_dir = _LEGACY_DATA_DIR
+            self._log(logging.WARNING, f"无法使用 AstrBot 标准数据目录，回退旧目录: {e}")
         os.makedirs(self._data_dir, exist_ok=True)
+        migrated = self._migrate_legacy_data(_LEGACY_DATA_DIR, self._data_dir)
+        if migrated:
+            self._log(logging.INFO, f"已迁移 {migrated} 个旧版数据文件到持久化目录")
         self._load_persisted_data()
         self._data_dirty = False  # 脏标记：仅在数据变更时持久化
 
         # 关键词路由表
         self._build_hub_keywords()
 
-        self._log(logging.INFO, "插件已加载 ProMax v2.1.4")
+        self._log(logging.INFO, "插件已加载 ProMax v2.1.5")
 
     # ============================================================
     # 数据持久化
     # ============================================================
+    def _migrate_legacy_data(self, legacy_dir: str, target_dir: str) -> int:
+        """把插件目录中的旧数据安全迁移到更新不会删除的标准数据目录。"""
+        if os.path.abspath(legacy_dir) == os.path.abspath(target_dir):
+            return 0
+        if not os.path.isdir(legacy_dir):
+            return 0
+        migrated = 0
+        for filename in _PERSISTED_DATA_FILES:
+            source = os.path.join(legacy_dir, filename)
+            target = os.path.join(target_dir, filename)
+            if not os.path.isfile(source):
+                continue
+            try:
+                if os.path.isfile(target) and os.path.getmtime(target) >= os.path.getmtime(source):
+                    continue
+                temporary = target + ".migrating"
+                shutil.copy2(source, temporary)
+                os.replace(temporary, target)
+                migrated += 1
+            except Exception as e:
+                self._log(logging.ERROR, f"迁移旧数据文件 {filename} 失败: {e}")
+        return migrated
+
     def _data_path(self, filename: str) -> str:
         return os.path.join(self._data_dir, filename)
 
@@ -2472,7 +2508,7 @@ class RepeatProMaxPlugin(Star):
         else:
             hub_section = "💕 抽老公/老婆功能未开启，请在管理面板中启用。\n"
         await event.send(event.plain_result(
-            f"\U0001F4DF RepeatProMax v2.1.4 指令帮助\n{'─'*30}\n"
+            f"\U0001F4DF RepeatProMax v2.1.5 指令帮助\n{'─'*30}\n"
             f"🔧 管理（仅群聊）\n"
             "  /复读开启          在本群开启复读\n"
             "  /复读关闭          在本群关闭复读\n"
@@ -2480,7 +2516,7 @@ class RepeatProMaxPlugin(Star):
             "  /复读统计          本群今日/本周/累计\n"
             f"{'─'*30}\n{hub_section}"
             f"{'─'*30}\n"
-            f"🔥 v2.1.4：优化玩法提示、求婚超时清理与文案一致性\n"
+            f"🔥 v2.1.5：玩法数据迁移至更新安全的持久化目录\n"
             f"⚙️ 更多参数请在 WebUI 管理面板调整"))
 
     # ============================================================
@@ -2506,6 +2542,38 @@ class RepeatProMaxPlugin(Star):
         await self._sync_config()
         cfg = self._cfg
 
+        raw_chain = getattr(mo, 'message', [])
+        chain = self._augment_repeat_chain(
+            raw_chain, getattr(mo, 'raw_message', None))
+        sig, txt = self._sig(chain, getattr(mo, 'raw_message', None))
+        if not sig:
+            self._dbg(
+                f"群 {gid} 消息没有可识别的文字、图片或表情组件: "
+                f"{[type(c).__name__ for c in (raw_chain or [])]}")
+            return
+
+        stripped = txt.strip() if txt else ""
+        # 关系玩法关键词必须先于复读的群范围和冷却判断。否则机器人刚复读后，
+        # 无前缀的“抽老婆”等指令会被复读冷却提前吞掉。
+        if cfg.get("hub_keyword") and stripped and not stripped.startswith(COMMAND_PREFIXES):
+            kw_mode = cfg.get("keyword_trigger_mode", "exact")
+            handler = None
+            if kw_mode == "exact":
+                handler = self._hub_kw.get(stripped)
+            elif kw_mode == "starts_with":
+                for kw, h in sorted(self._hub_kw.items(), key=lambda x: -len(x[0])):
+                    if stripped.startswith(kw):
+                        handler = h; break
+            elif kw_mode == "contains":
+                for kw, h in sorted(self._hub_kw.items(), key=lambda x: -len(x[0])):
+                    if kw in stripped:
+                        handler = h; break
+            if handler:
+                await handler(event)
+                return
+        if stripped.startswith(COMMAND_PREFIXES) or stripped in COMMAND_KEYWORDS:
+            return
+
         # 玩法群白/黑名单只限制关系玩法，不能误伤独立的复读功能。
         if gid in cfg["ignored_groups"]:
             self._dbg(f"群 {gid} 位于复读排除群列表")
@@ -2523,37 +2591,6 @@ class RepeatProMaxPlugin(Star):
         if remain_cd > 0:
             self._dbg(f"群 {gid} 复读冷却中，剩余 {remain_cd:.1f}s")
             return
-
-        raw_chain = getattr(mo, 'message', [])
-        chain = self._augment_repeat_chain(
-            raw_chain, getattr(mo, 'raw_message', None))
-        sig, txt = self._sig(chain, getattr(mo, 'raw_message', None))
-        if not sig:
-            self._dbg(
-                f"群 {gid} 消息没有可识别的文字、图片或表情组件: "
-                f"{[type(c).__name__ for c in (raw_chain or [])]}")
-            return
-
-        stripped = txt.strip() if txt else ""
-        # 抽老公/老婆关键词触发（支持 exact/starts_with/contains 三种模式）
-        # 检查命令前缀：避免与 @filter.command 双重触发（如 /强娶 在 contains 模式下同时被两个路径命中）
-        if cfg.get("hub_keyword") and stripped and not stripped.startswith(COMMAND_PREFIXES):
-            kw_mode = cfg.get("keyword_trigger_mode", "exact")
-            handler = None
-            if kw_mode == "exact":
-                handler = self._hub_kw.get(stripped)
-            elif kw_mode == "starts_with":
-                for kw, h in sorted(self._hub_kw.items(), key=lambda x: -len(x[0])):
-                    if stripped.startswith(kw):
-                        handler = h; break
-            elif kw_mode == "contains":
-                for kw, h in sorted(self._hub_kw.items(), key=lambda x: -len(x[0])):
-                    if kw in stripped:
-                        handler = h; break
-            if handler:
-                await handler(event)
-                return
-        if stripped.startswith(COMMAND_PREFIXES) or stripped in COMMAND_KEYWORDS: return
         if not self._pass_len(txt): return
         if txt and cfg["blacklist_re"] and cfg["blacklist_re"].search(txt):
             self._dbg(f"命中黑名单: '{txt[:30]}'"); return

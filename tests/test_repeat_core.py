@@ -3,6 +3,7 @@ import importlib.util
 import json
 import re
 import sys
+import tempfile
 import time
 import types
 import unittest
@@ -72,6 +73,11 @@ def _install_astrbot_stubs():
         def __init__(self, context=None):
             self.context = context
 
+    class StarTools:
+        @staticmethod
+        def get_data_dir(plugin_name=None):
+            return Path(tempfile.gettempdir()) / (plugin_name or "astrbot_plugin_test")
+
     class AstrBotConfig(dict):
         pass
 
@@ -79,6 +85,7 @@ def _install_astrbot_stubs():
     event.AstrMessageEvent = AstrMessageEvent
     star.Context = Context
     star.Star = Star
+    star.StarTools = StarTools
     components.Plain = Plain
     components.Image = Image
     components.Face = Face
@@ -226,6 +233,37 @@ async def send_three(plugin, chain_factory, senders=("10001", "10001", "10001"),
 
 
 class RepeatCoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gameplay_keyword_still_runs_during_repeat_cooldown(self):
+        plugin = make_plugin(hub_keyword=True, cooldown=10)
+        plugin.last_repeat_time["20001"] = time.time()
+        handled = []
+
+        async def draw_handler(event):
+            handled.append(event)
+            await event.send(event.plain_result("抽取已处理"))
+
+        plugin._hub_kw = {"抽老婆": draw_handler}
+        event = FakeEvent([Plain("抽老婆")])
+        await plugin._pipe(event)
+
+        self.assertEqual(handled, [event])
+        self.assertEqual(event.sent, ["抽取已处理"])
+
+    async def test_legacy_gameplay_data_migrates_only_once(self):
+        plugin = make_plugin()
+        plugin._log = lambda *args, **kwargs: None
+        with tempfile.TemporaryDirectory() as legacy_dir, tempfile.TemporaryDirectory() as target_dir:
+            source = Path(legacy_dir) / "wife_records.json"
+            source.write_text('{"20001:10001": {"target": "10002"}}', encoding="utf-8")
+
+            migrated = plugin._migrate_legacy_data(legacy_dir, target_dir)
+            self.assertEqual(migrated, 1)
+            self.assertEqual(
+                (Path(target_dir) / "wife_records.json").read_text(encoding="utf-8"),
+                source.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(plugin._migrate_legacy_data(legacy_dir, target_dir), 0)
+
     async def test_plain_emoji_triggers_on_third_message(self):
         plugin = make_plugin()
         events = await send_three(plugin, lambda _: [Plain("😀")])

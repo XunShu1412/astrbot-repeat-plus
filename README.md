@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.1.4-blue?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-v2.1.5-blue?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.0.0-green?style=flat-square" alt="astrbot">
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/python-3.8+-purple?style=flat-square" alt="python">
@@ -30,7 +30,7 @@
 <tr><td><b>💕 抽老公/老婆</b></td><td>双模式独立开启，可共存。每日抽取 + 强娶 + 活跃池 + 全群抽取模式，轻松群聊风文案，抽取、强娶、求婚等场景共 100+ 条随机回复。</td></tr>
 <tr><td><b>💍 求婚系统</b></td><td>定向求婚，对方可在 5 分钟内接受或拒绝；每日次数和冷却可配，拒绝或超时自动返还。</td></tr>
 <tr><td><b>📊 羁绊关系图</b></td><td>Vis.js 力导向布局渲染，并行 API 加速，贝塞尔曲线连线，4 色边区分羁绊类型，深色主题 + 统计面板。Playwright 截图输出 PNG。</td></tr>
-<tr><td><b>💾 数据持久化</b></td><td>关系记录、随机抽取额度、活跃数据及强娶/求婚状态均保存到本地，关键状态变更后立即落盘。</td></tr>
+<tr><td><b>💾 数据持久化</b></td><td>关系记录、随机抽取额度、活跃数据及强娶/求婚状态均保存到 AstrBot 标准插件数据目录，更新或重装插件不会清空记录。</td></tr>
 <tr><td><b>⚙️ 可视化配置</b></td><td>10 组 45 项配置项，AstrBot WebUI 管理面板中直接调整，无需改代码。</td></tr>
 </table>
 
@@ -237,6 +237,7 @@ playwright install chromium
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| **v2.1.5** | 2026-09-12 | 玩法数据迁移至 AstrBot 标准持久化目录；修复复读冷却期间无前缀抽取指令无响应，并加入更新安全迁移与回归测试 |
 | **v2.1.4** | 2026-09-12 | 全面优化用户话术和后台说明；区分活跃池/全群池空提示，统一随机额度与求婚反馈，修复老婆模式“其他”误替换、最近结果取错及过期求婚长期占位 |
 | **v2.1.3** | 2026-09-12 | 修复 QQ 收藏/自定义表情使用临时文件名时无法识别为同一内容；优先读取原始 OneBot 的 `file_unique` 与稳定媒体标识 |
 | **v2.1.2** | 2026-09-12 | 修复 QQ 商城/动态表情复读、触发计数及玩法群名单误伤；随机抽取额度改为独立持久化账本，强娶/求婚不再重置额度或参与排行；增加状态诊断与自动化测试 |
@@ -289,7 +290,9 @@ playwright install chromium
 <details>
 <summary><b>Q: 数据会丢失吗？</b></summary>
 
-不会。抽取记录、独立的每日抽取额度、活跃数据和强娶 CD 全部持久化到 `data/` 目录，正常重载或重启后仍会保留。
+v2.1.5 起，抽取记录、独立的每日抽取额度、活跃数据及强娶/求婚状态统一保存到 AstrBot 的 `data/plugin_data/astrbot_plugin_repeat_promax/`，后续更新或重装不会再随插件目录一起删除。
+
+从 v2.1.4 及更早版本首次升级时，请先备份旧插件目录中的 `data/`。如果采用原目录覆盖安装，插件首次启动会自动迁移；如果 AstrBot 采用“先删旧目录再更新”的方式，请先把旧数据复制到上述标准持久化目录。
 </details>
 
 <details>

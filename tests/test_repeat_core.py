@@ -326,6 +326,32 @@ class RepeatCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plugin._hub_draw_used("20001", "10001"), 1)
         self.assertEqual(len(plugin._hub_today("20001")), 1)
 
+    async def test_total_delivery_failure_rolls_back_draw_and_mutual_usage(self):
+        plugin = make_plugin(hub_daily=10, auto_set_other_half=True)
+        plugin._log = lambda *args, **kwargs: None
+        plugin._hub_active = {
+            "20001": {"30001": {"name": "候选成员", "ts": time.time()}}
+        }
+
+        async def full_pool(*_):
+            return ["30001"]
+
+        async def failed_send(_):
+            raise RuntimeError("message delivery failed")
+
+        plugin._hub_resolve_pool = full_pool
+        plugin._hub_weighted_choice = lambda *_: "30001"
+        event = FakeEvent([Plain("抽老婆")])
+        event.send = failed_send
+
+        with self.assertRaisesRegex(RuntimeError, "message delivery failed"):
+            await plugin._cmd_wife_draw(event)
+
+        self.assertEqual(plugin._hub_draw_used("20001", "10001"), 0)
+        self.assertEqual(plugin._hub_draw_used("20001", "30001"), 0)
+        self.assertEqual(plugin._hub_today("20001"), [])
+        self.assertNotIn("30001", plugin._hub_drawn_recent.get("20001", {}))
+
     async def test_switching_draw_mode_cannot_reset_or_bypass_daily_limit(self):
         plugin = make_plugin(hub_keyword=True, hub_daily=3)
         targets = ["30001", "30002", "30003", "30004"]

@@ -1501,6 +1501,21 @@ class RepeatProMaxPlugin(Star):
         self._data_dirty = True
         return used
 
+    def _hub_refund_draw(self, gid: str, uid: str) -> int:
+        """随机抽取额度 -1 并返回最新用量；仅用于结果完全发送失败回滚。"""
+        counts = self._hub_draw_usage.get(gid, {})
+        if not isinstance(counts, dict):
+            return 0
+        used = max(0, self._hub_draw_used(gid, uid) - 1)
+        if used:
+            counts[uid] = used
+        else:
+            counts.pop(uid, None)
+        if not counts:
+            self._hub_draw_usage.pop(gid, None)
+        self._data_dirty = True
+        return used
+
     def _already_msg(self, user_recs: List[Dict], daily: int, mode: str, sender_name: str, sender_id: str) -> Tuple[str, str, str]:
         """构造已绑定提示: 返回 (tpl_key, 格式化文本, husband_id)"""
         # 多次抽取达到上限时，话术写的是“最近/最后一位”，必须展示最新记录。
@@ -1675,6 +1690,9 @@ class RepeatProMaxPlugin(Star):
         husband_id = self._hub_weighted_choice(gid, pool)
         self._dbg(f"抽取池大小={len(pool)}, 抽中={husband_id}")
         husband_name = self._hub_active.get(gid, {}).get(husband_id, {}).get("name", f"用户({husband_id})")
+        added_records: List[Dict[str, Any]] = []
+        previous_recent: Optional[float] = None
+        drawn_mark: Optional[float] = None
         async with self.lock:
             # 在锁内获取 today_recs，确保引用不被 _sync_config 替换导致写入丢失
             today_recs = self._hub_init_today(gid)
@@ -1692,23 +1710,30 @@ class RepeatProMaxPlugin(Star):
                         f"⏰ 今日随机抽取次数已用完（{used}/{daily}）。", "")
             else:
                 already_msg = None
-                today_recs.append({
+                primary_record = {
                     "user_id": uid, "user_name": event.get_sender_name() or uid,
                     "husband_id": husband_id, "husband_name": husband_name,
                     "ts": time.time(), "source": "draw",
-                })
+                }
+                today_recs.append(primary_record)
+                added_records.append(primary_record)
                 new_used = self._hub_consume_draw(gid, uid)
                 remain = max(0, daily - new_used)
                 # 概率衰减：记录被抽时间，后续抽取时降低权重
-                self._hub_drawn_recent.setdefault(gid, {})[husband_id] = time.time()
+                recent = self._hub_drawn_recent.setdefault(gid, {})
+                previous_recent = recent.get(husband_id)
+                drawn_mark = time.time()
+                recent[husband_id] = drawn_mark
                 if self._cfg.get("auto_set_other_half"):
                     other_used = self._hub_draw_used(gid, husband_id)
                     if other_used < daily:
-                        today_recs.append({
+                        mutual_record = {
                             "user_id": husband_id, "user_name": husband_name,
                             "husband_id": uid, "husband_name": event.get_sender_name() or uid,
                             "ts": time.time(), "source": "mutual",
-                        })
+                        }
+                        today_recs.append(mutual_record)
+                        added_records.append(mutual_record)
                         self._hub_consume_draw(gid, husband_id)
         if already_msg:
             tpl2, hid2 = already_msg
@@ -1725,9 +1750,31 @@ class RepeatProMaxPlugin(Star):
             user=event.get_sender_name() or uid, husband=husband_name,
             suffix=self._hb("draw_suffix", mode).format(remain=remain))
 
-        result = await self._send_hub_avatar_result(
-            event, tpl, husband_id,
-            husband_id if self._cfg.get("at_waifu") else None)
+        try:
+            result = await self._send_hub_avatar_result(
+                event, tpl, husband_id,
+                husband_id if self._cfg.get("at_waifu") else None)
+        except Exception:
+            # 富媒体与纯文字都发送失败时，本次抽取对用户不可见，必须返还记录和额度。
+            async with self.lock:
+                current_records = self._hub_records.get(gid, {}).get("records", [])
+                for added in added_records:
+                    for index in range(len(current_records) - 1, -1, -1):
+                        if current_records[index] is added or current_records[index] == added:
+                            current_records.pop(index)
+                            break
+                self._hub_refund_draw(gid, uid)
+                if len(added_records) > 1:
+                    self._hub_refund_draw(gid, husband_id)
+                recent = self._hub_drawn_recent.get(gid, {})
+                if drawn_mark is not None and recent.get(husband_id) == drawn_mark:
+                    if previous_recent is None:
+                        recent.pop(husband_id, None)
+                    else:
+                        recent[husband_id] = previous_recent
+                self._data_dirty = True
+            self._flush_persisted_data()
+            raise
 
         # auto_withdraw
         if self._cfg.get("auto_withdraw_enabled") and result:

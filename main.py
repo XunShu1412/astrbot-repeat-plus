@@ -1676,6 +1676,7 @@ class RepeatPlusPlugin(Star):
         if not hus and not wife:
             await event.send(event.plain_result("❌ 抽老公/老婆功能未开启，请在管理面板中启用。"))
             return
+        propose_mode = "wife" if wife else "husband"
         uid = str(event.get_sender_id())
         chain = getattr(event.message_obj, 'message', [])
 
@@ -1685,23 +1686,31 @@ class RepeatPlusPlugin(Star):
                 qq = getattr(c, 'qq', None)
                 if qq: target_id = str(qq); break
         if not target_id:
-            await event.send(event.plain_result("💍 请 @ 你想要求婚的对象！\n格式：/求婚 @用户"))
+            await event.send(event.plain_result(
+                self._hb("propose_no_target", propose_mode)))
             return
         if target_id == uid:
-            await event.send(event.plain_result("🤔 你不能向自己求婚哦！"))
+            await event.send(event.plain_result(
+                self._hb("propose_self", propose_mode)))
+            return
+        if target_id in self._cfg.get("hub_excluded", set()) or target_id == "0":
+            await event.send(event.plain_result(
+                self._hb("propose_excluded", propose_mode)))
             return
         bot_id = str(getattr(event.message_obj, 'self_id', ''))
         if target_id == bot_id and not self._cfg.get("allow_marry_bot"):
-            await event.send(event.plain_result("🤖 不能向机器人求婚哦~"))
+            await event.send(event.plain_result(
+                self._hb("propose_bot_disabled", propose_mode)))
             return
 
         now_ts = time.time()
         propose_cd = self._cfg.get("hub_propose_cd", 86400)
         propose_daily = self._cfg.get("hub_propose_daily", 3)
 
-        target_name = self._hub_active.get(gid, {}).get(target_id, {}).get("name", f"用户({target_id})")
+        target_name = ("机器人" if target_id == bot_id else
+                       self._hub_active.get(gid, {}).get(
+                           target_id, {}).get("name", f"用户({target_id})"))
         user_name = event.get_sender_name() or uid
-        propose_mode = "wife" if wife else "husband"
         label = self._hb_label(propose_mode)
 
         async with self.lock:
@@ -1709,7 +1718,7 @@ class RepeatPlusPlugin(Star):
             lock_msg = None
             group_proposals = self._proposals.get(gid, {})
             if target_id in group_proposals:
-                lock_msg = "💍 对方已有待处理的求婚请求，请稍后再试。"
+                lock_msg = self._hb("propose_pending", propose_mode)
             if lock_msg is None and propose_cd > 0:
                 last_p2 = self._hub_propose_cd.get(uid, 0)
                 if now_ts - last_p2 < propose_cd:
@@ -1725,16 +1734,16 @@ class RepeatPlusPlugin(Star):
                 self._proposals.setdefault(gid, {})[target_id] = {
                     "from": uid, "from_name": user_name,
                     "to": target_id, "to_name": target_name,
-                    "ts": now_ts,
+                    "mode": propose_mode, "ts": now_ts,
                 }
         if lock_msg:
             await event.send(event.plain_result(lock_msg))
             return
+        invite = self._hb("propose_invite", propose_mode).format(
+            user=user_name, label=label)
         await event.send(event.chain_result([
             At(qq=target_id),
-            Plain(f"\n💍 {user_name} 向你求婚了！\n\n"
-                  f"「从今天起，你就是我的{label}了！」\n\n"
-                  f">> 对方回复 /接受求婚 或 /拒绝求婚 来回应"),
+            Plain("\n" + invite),
         ]))
 
     @filter.command("接受求婚")
@@ -1767,7 +1776,7 @@ class RepeatPlusPlugin(Star):
                 self._data_dirty = True
                 expired = True
             else:
-                propose_mode = "wife" if wife else "husband"
+                propose_mode = proposal.get("mode", "wife" if wife else "husband")
                 label = self._hb_label(propose_mode)
                 now = time.time()
                 self._hub_init_today(gid).append({
@@ -1785,15 +1794,15 @@ class RepeatPlusPlugin(Star):
                 to_name = proposal["to_name"]
 
         if no_proposal:
-            await e.send(e.plain_result("💍 你当前没有待处理的求婚请求。"))
+            await e.send(e.plain_result(self._hb("propose_none")))
             return
         if expired:
-            await e.send(e.plain_result("⏰ 求婚请求已过期（5分钟），请重新发起。\n💡 求婚次数已返还~"))
+            await e.send(e.plain_result(self._hb("propose_expired")))
             return
 
         await e.send(e.plain_result(
-            f"💒 恭喜！{from_name} 和 {to_name} 喜结连理！\n"
-            f"从今天起，{to_name} 就是 {from_name} 的{label}了！🎉"))
+            self._hb("propose_accept", propose_mode).format(
+                from_name=from_name, to_name=to_name, label=label)))
 
     async def _cmd_accept_proposal(self, event: AstrMessageEvent) -> None:
         await self.on_accept_proposal(event)
@@ -1821,12 +1830,15 @@ class RepeatPlusPlugin(Star):
                     self._proposals.pop(gid, None)
                 self._data_dirty = True
                 from_name = proposal["from_name"]
+                propose_mode = proposal.get("mode", "husband")
 
         if no_proposal:
-            await e.send(e.plain_result("💍 你当前没有待处理的求婚请求。"))
+            await e.send(e.plain_result(self._hb("propose_none")))
             return
 
-        await e.send(e.plain_result(f"💔 {from_name} 的求婚被拒绝了...\n💡 求婚次数已返还，可以重新求婚~"))
+        await e.send(e.plain_result(
+            self._hb("propose_reject", propose_mode).format(
+                from_name=from_name)))
 
     async def _cmd_reject_proposal(self, event: AstrMessageEvent) -> None:
         await self.on_reject_proposal(event)

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.1.0-blue?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-v2.1.1-blue?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.0.0-green?style=flat-square" alt="astrbot">
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/python-3.8+-purple?style=flat-square" alt="python">
@@ -237,6 +237,7 @@ playwright install chromium
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| **v2.1.1** | 2026-09-12 | 项目品牌由 RepeatPlus 升级为 RepeatProMax，同步插件标识、后台展示名、代码类名与仓库地址 |
 | **v2.1.0** | 2026-09-12 | 强娶改为本群成员校验且不受活跃池限制；修复关键词重复触发、求婚覆盖、活跃池缓存与关系图 CDN 竞态；扩充 100+ 条场景文案 |
 | **v2.0.5** | 2026-07-01 | Vis.js 改为 CDN 加载（jsdelivr + unpkg），移除 630KB 嵌入文件，repo 缩小 25%，解决 GitHub 下载超时断开问题 |
 | **v2.0.5** | 2026-07-01 | 抽取概率衰减加权：被抽中的人概率降低（最低 1/20），随时间自然恢复（默认 7 天），新增 `husband_draw_decay_days` 配置 |

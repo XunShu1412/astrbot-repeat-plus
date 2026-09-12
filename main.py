@@ -2015,7 +2015,7 @@ class RepeatProMaxPlugin(Star):
         else:
             hub_section = "💕 抽老公/老婆功能未开启，请在管理面板中启用。\n"
         await event.send(event.plain_result(
-            f"\U0001F4DF 复读插件 v2.1.0 指令帮助\n{'─'*30}\n"
+            f"\U0001F4DF RepeatProMax v2.1.1 指令帮助\n{'─'*30}\n"
             f"🔧 管理（仅群聊）\n"
             "  /复读开启          在本群开启复读\n"
             "  /复读关闭          在本群关闭复读\n"
@@ -2023,7 +2023,7 @@ class RepeatProMaxPlugin(Star):
             "  /复读统计          本群今日/本周/累计\n"
             f"{'─'*30}\n{hub_section}"
             f"{'─'*30}\n"
-            f"🔥 v2.1.0: 强娶群成员校验 / 文案扩充 / 稳定性优化\n"
+            f"🔥 v2.1.1: 品牌升级为 RepeatProMax\n"
             f"⚙️ 更多参数请在 WebUI 管理面板调整"))
 
     # ============================================================
